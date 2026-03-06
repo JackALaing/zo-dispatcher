@@ -1,0 +1,19 @@
+{
+  "agents_dir": "./agents",
+  "db_path": "./data/dispatcher.db",
+  "zo_api_url": "https://api.zo.computer",
+  "default_model": null,
+  "poll_interval_seconds": 60,
+  "transforms_dir": "./transforms",
+  "webhook_port": 8790,
+  "max_concurrent_dispatches": 5,
+  "zo_ask_timeout_seconds": 1800,
+  "empty_response_retry_delays": [15, 30, 60],
+  "session_pool_retry_delays": [15, 30, 60, 120],
+  "notification_hours": {"start": 9, "end": 21},
+  "notification_timezone": "America/New_York",
+  "webhook_rate_limit": 60,
+  "dedupe_hours": 24,
+  "system_notification_channel": "sms",
+  "channels": {}
+}

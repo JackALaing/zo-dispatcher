@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+venv/
+.venv/
+
+# SQLite
+*.db
+*.db-shm
+*.db-wal
+
+# Runtime
+data/
+logs/
+*.log
+
+# User config & secrets
+config/config.json
+transforms/
+agents/
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Legacy
+dispatcher-cli.py
