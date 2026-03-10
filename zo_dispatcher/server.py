@@ -176,6 +176,7 @@ class Dispatcher:
                     channel_spec=notif["channel_spec"],
                     title=notif["title"],
                     content=notif["content"],
+                    conv_id=notif.get("conv_id", ""),
                 )
             except Exception:
                 failed.append(notif)
