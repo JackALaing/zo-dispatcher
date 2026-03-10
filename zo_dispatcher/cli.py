@@ -193,7 +193,7 @@ def cmd_webhook_update(args, config):
     print(f"Updated webhook source: {args.source}")
     for k, v in updates.items():
         if k != "updated_at":
-            print(f"  {k}: {current.get(k, '')} → {v}")
+            print(f"  {k}: {current.get(k, '')} -> {v}")
 
 
 def cmd_webhook_remove(args, config):
@@ -393,7 +393,7 @@ def cmd_channel_list(args, config):
     if not channels:
         print("  (none)")
     for name, cfg in channels.items():
-        print(f"  {name} → {cfg.get('url', '?')}")
+        print(f"  {name} -> {cfg.get('url', '?')}")
 
 
 def cmd_channel_show(args, config):
@@ -482,7 +482,7 @@ def cmd_agent_list(args, config):
                     event_str += f" (+{len(event) - 1} more)"
             else:
                 event_str = event or "?"
-            print(f"  {a['id']}: {a.get('title', a['id'])} → {event_str}{tag}{status}")
+            print(f"  {a['id']}: {a.get('title', a['id'])} -> {event_str}{tag}{status}")
 
 
 def cmd_agent_show(args, config):

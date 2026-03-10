@@ -92,7 +92,7 @@ def parse_agent_file(filepath: Path, agents_dir: Path) -> tuple[dict | None, str
 
     # Namespaced ID from relative path
     rel = filepath.relative_to(agents_dir)
-    agent_id = str(rel.with_suffix(""))  # "schedules/memory-extraction"
+    agent_id = str(rel.with_suffix("")).replace("\\", "/")  # "schedules/memory-extraction"
 
     warnings = []
     if defer_to_cron and "{{ queue_file }}" not in body:
