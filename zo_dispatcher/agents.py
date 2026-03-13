@@ -94,6 +94,30 @@ def parse_agent_file(filepath: Path, agents_dir: Path) -> tuple[dict | None, str
     rel = filepath.relative_to(agents_dir)
     agent_id = str(rel.with_suffix("")).replace("\\", "/")  # "schedules/memory-extraction"
 
+    # Validate rate_limit format
+    raw_rate_limit = frontmatter.get("rate_limit")
+    if raw_rate_limit is not None:
+        try:
+            parse_rate_limit(str(raw_rate_limit))
+        except ValueError as e:
+            logger.warning(f"Invalid rate_limit in {filepath}: {e}")
+            return None, str(e)
+
+    # Parse expires_at
+    raw_expires = frontmatter.get("expires_at")
+    expires_at = None
+    if raw_expires is not None:
+        try:
+            if isinstance(raw_expires, datetime):
+                expires_at = raw_expires
+            else:
+                expires_at = datetime.fromisoformat(str(raw_expires))
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Invalid expires_at in {filepath}: {e}")
+            return None, f"Invalid expires_at: {e}"
+
     warnings = []
     if defer_to_cron and "{{ queue_file }}" not in body:
         msg = f"defer_to_cron: {defer_to_cron} but prompt does not contain {{{{ queue_file }}}}"
@@ -113,12 +137,32 @@ def parse_agent_file(filepath: Path, agents_dir: Path) -> tuple[dict | None, str
         "notify": frontmatter.get("notify", "errors"),
         "timeout": frontmatter.get("timeout"),
         "retry_delays": frontmatter.get("retry_delays"),
+        "rate_limit": str(raw_rate_limit) if raw_rate_limit is not None else None,
         "max_runs": frontmatter.get("max_runs"),
-        "max_runs_window": frontmatter.get("max_runs_window", 3600),
+        "expires_at": expires_at,
         "defer_to_cron": defer_to_cron,
         "prompt": body,
+        "_path": str(filepath),
         "_warnings": warnings,
     }, None
+
+
+def parse_rate_limit(rate_limit: str) -> tuple[int, int]:
+    """Parse 'N/unit' into (count, window_seconds)."""
+    parts = rate_limit.strip().split("/", 1)
+    if len(parts) != 2:
+        raise ValueError(f"Invalid rate_limit format: {rate_limit!r} (expected 'N/unit')")
+    count_str, unit = parts
+    try:
+        count = int(count_str)
+    except ValueError:
+        raise ValueError(f"Invalid rate_limit count: {count_str!r}")
+    if count < 0:
+        raise ValueError(f"rate_limit count must be non-negative, got {count}")
+    windows = {"minute": 60, "hour": 3600, "day": 86400}
+    if unit not in windows:
+        raise ValueError(f"Invalid rate_limit unit: {unit!r} (expected minute, hour, or day)")
+    return count, windows[unit]
 
 
 def compute_next_run(rrule_str: str, after: datetime) -> datetime | None:

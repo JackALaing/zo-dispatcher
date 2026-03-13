@@ -58,6 +58,11 @@ class DispatcherDB:
                 conv_id TEXT DEFAULT '',
                 queued_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS agent_state (
+                agent_id TEXT PRIMARY KEY,
+                disabled_at TEXT
+            );
         """)
         self.conn.commit()
 
@@ -118,6 +123,38 @@ class DispatcherDB:
     def prune_old_events(self, hours: int = 24):
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         self.conn.execute("DELETE FROM webhook_events WHERE received_at < ?", (cutoff,))
+        self.conn.commit()
+
+    def count_total_runs(self, agent_id: str) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM agent_runs WHERE agent_id = ?",
+            (agent_id,)
+        ).fetchone()
+        return row[0]
+
+    def set_disabled_at(self, agent_id: str, timestamp: datetime):
+        ts = timestamp.isoformat()
+        self.conn.execute(
+            "INSERT OR REPLACE INTO agent_state (agent_id, disabled_at) VALUES (?, ?)",
+            (agent_id, ts)
+        )
+        self.conn.commit()
+
+    def get_disabled_at(self, agent_id: str) -> datetime | None:
+        row = self.conn.execute(
+            "SELECT disabled_at FROM agent_state WHERE agent_id = ?",
+            (agent_id,)
+        ).fetchone()
+        if row and row[0]:
+            return datetime.fromisoformat(row[0])
+        return None
+
+    def clear_disabled(self, agent_id: str):
+        self.conn.execute("DELETE FROM agent_state WHERE agent_id = ?", (agent_id,))
+        self.conn.commit()
+
+    def clear_runs(self, agent_id: str):
+        self.conn.execute("DELETE FROM agent_runs WHERE agent_id = ?", (agent_id,))
         self.conn.commit()
 
     def count_runs_in_window(self, agent_id: str, window_seconds: int) -> int:

@@ -35,7 +35,7 @@ Direct the user to [Settings > Advanced](/?t=settings&s=advanced) to add the web
 
 Create a markdown file in the agents directory. Choose the pattern (Trigger, Sentinel, or Inbox) based on the [decision tree](../SKILL.md#choosing-a-pattern) in SKILL.md. Set the frontmatter fields accordingly and write the prompt body.
 
-**Always set `max_runs` for webhook and dual-trigger agents** to control LLM token costs.
+**Always set `rate_limit` for webhook and dual-trigger agents** to control LLM token costs. Use `max_runs` or `expires_at` for agents that should auto-disable after a limit. `max_runs` counts dispatches per activation cycle, not lifetime. Re-enabling an agent (setting `active: true`) resets the counter. See the scheduled agents reference for full lifecycle limit details.
 
 For Inbox agents, the prompt must include `{{ queue_file }}` (the parser warns if missing).
 
@@ -72,7 +72,7 @@ Use `--transform-script <source>.py` when registering the webhook source. See `r
 
 Fires immediately on every matching webhook event. Use for high-urgency, low-volume events.
 
-**Always set `max_runs`.** Each event is a separate LLM call. Without a budget cap, a burst of events can run up costs fast.
+**Always set `rate_limit`.** Each event is a separate LLM call. Without a throttle, a burst of events can run up costs fast. Use `max_runs: 1` for one-time event handlers (e.g., "notify me when the next release is published, then stop"). See the scheduled agents reference for full lifecycle limit details.
 
 ### Example: GitHub Issue Alert
 
@@ -85,7 +85,7 @@ event:
   - github.reopened
 notify_channel: discord/general
 notify: always
-max_runs: 50
+rate_limit: "50/day"
 ---
 
 A new issue was filed or reopened.
@@ -101,7 +101,7 @@ Summarize: which repo, who filed it, what the issue is about. Flag if it looks u
 
 Use when you need both immediate reaction to events and independent periodic work. Uses `trigger: both` with `defer_to_cron: false` (the default).
 
-**Always set `max_runs`.** The budget counts both scheduled + webhook runs combined.
+**Always set `rate_limit`.** The budget counts both scheduled + webhook runs combined.
 
 ### Example: GitHub PR Sentinel
 
@@ -115,8 +115,7 @@ rrule: |-
 event: github.opened
 notify_channel: discord/general
 notify: always
-max_runs: 50
-max_runs_window: 86400
+rate_limit: "50/day"
 ---
 
 If triggered by a webhook, evaluate the incoming PR:
@@ -257,6 +256,6 @@ Group events by source, summarize activity, and highlight anything that needs at
 
 ### How the Queue Works
 
-Webhook events are appended to a JSONL queue file. On the next scheduled tick, the dispatcher checks the queue. If it has events, they are atomically snapshotted and `{{ queue_file }}` resolves to the snapshot path. If the queue is empty and the mode is `always_run`, `{{ queue_file }}` resolves to `"No events queued."`. On success, the snapshot is deleted. On failure, it's preserved for retry. Events arriving during a run go to a fresh queue. Deferred events do not count against `max_runs`.
+Webhook events are appended to a JSONL queue file. On the next scheduled tick, the dispatcher checks the queue. If it has events, they are atomically snapshotted and `{{ queue_file }}` resolves to the snapshot path. If the queue is empty and the mode is `always_run`, `{{ queue_file }}` resolves to `"No events queued."`. On success, the snapshot is deleted. On failure, it's preserved for retry. Events arriving during a run go to a fresh queue. Deferred events do not count against `rate_limit` or `max_runs`.
 
 Each JSONL line is: `{"event_type": "todoist.item.added", "payload": {...}, "received_at": "..."}`.

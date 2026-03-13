@@ -58,3 +58,68 @@ Summarize the past week's activity:
 3. Highlight blockers or stale PRs
 4. Produce a concise summary suitable for a status update
 ```
+
+## Lifecycle Limits
+
+Three fields control how long an agent stays active. All three are optional and independent — use any combination.
+
+| Field | Effect | Agent stays active? |
+|-------|--------|---------------------|
+| `rate_limit` | Per-window throttle (`"N/unit"`, e.g., `"10/hour"`). Excess dispatches are dropped. | Yes (warning only) |
+| `max_runs` | Total dispatches per activation cycle before auto-disable. Count resets when re-enabled. | No — auto-disables |
+| `expires_at` | ISO 8601 datetime. Agent auto-disables when this time is reached. | No — auto-disables |
+
+### Re-enabling
+
+- For `max_runs`: set `active: true`. The run count resets automatically on re-enable.
+- For `expires_at`: update to a future datetime or remove the field, then set `active: true`.
+
+### Example: Fire-Once Reminder
+
+Use `max_runs: 1` for tasks that should fire exactly once:
+
+```yaml
+---
+title: Push Release Branch
+trigger: schedule
+rrule: |-
+  DTSTART;TZID=America/New_York:20260313T150000
+  RRULE:FREQ=DAILY;BYHOUR=15;BYMINUTE=0
+max_runs: 1
+notify_channel: sms
+notify: always
+active: true
+---
+
+Remind Jack to push the release branch.
+```
+
+After dispatch, the dispatcher sets `active: false` in the file. The file stays on disk, disabled and ready to be reconfigured.
+
+### Reusable Templates
+
+Keep dormant `max_runs: 1` agent files as templates (e.g., `agents/reminders/reminder-1.md`). To schedule a reminder: update the prompt and rrule, set `active: true`, and let it fire. It auto-disables afterward, ready for the next use.
+
+### Example: Time-Limited Agent
+
+Use `expires_at` for agents that should stop after a deadline:
+
+```yaml
+---
+title: Conference Monitor
+trigger: webhook
+event: twitter.mention
+expires_at: "2026-03-15T18:00:00-04:00"
+notify_channel: discord/general
+notify: always
+active: true
+---
+
+Monitor mentions during the conference and summarize each one.
+```
+
+### Caveats
+
+- **Don't move a `max_runs` agent file after enabling it.** The dispatcher tracks the file path at scan time. If the file moves before the agent fires, the write-back fails (logged as an error) and the agent fires a second time from its new location before self-correcting.
+- Lifecycle limits work with all trigger types (`schedule`, `webhook`, `both`).
+- Auto-disable happens after retries are exhausted, so transient failures don't leave the agent in an ambiguous state.

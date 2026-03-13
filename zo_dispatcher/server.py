@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import signal
 import sys
 import time
@@ -24,7 +25,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from zo_dispatcher.db import DispatcherDB
-from zo_dispatcher.agents import parse_agent_file, compute_next_run
+from zo_dispatcher.agents import parse_agent_file, compute_next_run, parse_rate_limit
 from zo_dispatcher.webhooks import verify_signature, apply_transform, event_matches, _get_nested_value
 from zo_dispatcher.channels import BUILTIN_CHANNELS, MCP_URL, CHANNEL_RETRY_DELAYS
 
@@ -80,8 +81,9 @@ class Dispatcher:
         #     so bursty webhooks can't starve scheduled work.
         #   _source_locks — per-source serialization for webhook events.
         #   _in_flight — tracks all async dispatch tasks for graceful shutdown.
-        #   max_runs / max_runs_window (per-agent frontmatter) — caps how many times an
-        #     individual agent runs within a time window. Cost/rate control.
+        #   rate_limit (per-agent frontmatter) — per-window throttle ("N/unit").
+        #   max_runs (per-agent frontmatter) — total dispatches per activation cycle.
+        #   expires_at (per-agent frontmatter) — absolute expiry datetime.
         self._dispatch_semaphore = asyncio.Semaphore(config.get("max_concurrent_dispatches", 5))
         self._in_flight: set[asyncio.Task] = set()
         self._max_runs_warned_at: dict[str, float] = {}  # agent_id -> monotonic time of last warning
@@ -352,11 +354,82 @@ class Dispatcher:
         if success and snapshot.exists():
             snapshot.unlink()
 
+    def _is_expired(self, agent: dict) -> bool:
+        expires_at = agent.get("expires_at")
+        if not expires_at:
+            return False
+        now = datetime.now(timezone.utc)
+        if isinstance(expires_at, str):
+            expires_at = datetime.fromisoformat(expires_at)
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        return now >= expires_at
+
+    def _is_max_runs_reached(self, agent: dict) -> bool:
+        max_runs = agent.get("max_runs")
+        if max_runs is None:
+            return False
+        count = self.db.count_total_runs(agent["id"])
+        return count >= max_runs
+
+    def _check_re_enable(self, agent: dict):
+        if not agent.get("active", True):
+            return
+        max_runs = agent.get("max_runs")
+        if max_runs is None:
+            return
+        disabled_at = self.db.get_disabled_at(agent["id"])
+        if disabled_at is not None:
+            logger.info(f"Agent '{agent['id']}' re-enabled (was disabled at {disabled_at.isoformat()}), resetting run count")
+            self.db.clear_runs(agent["id"])
+            self.db.clear_disabled(agent["id"])
+
+    async def _notify_lifecycle(self, agent: dict, title: str, content: str):
+        notify = agent.get("notify", "errors")
+        if notify != "always":
+            return  # only notify: always gets lifecycle notifications
+        notify_channel = agent.get("notify_channel")
+        if notify_channel:
+            await self._notify(notify_channel, title, content)
+        else:
+            # no agent channel — fall back to system channel so auto-disables
+            # are never silently lost
+            system_channel = self.config.get("system_notification_channel")
+            if system_channel:
+                await self._notify(system_channel, title, content)
+
+    async def _handle_expiry(self, agent: dict) -> bool:
+        if not self._is_expired(agent):
+            return False
+        self._set_agent_active(agent, False)
+        logger.info(f"Agent '{agent['id']}' expired (expires_at={agent['expires_at']}), set active: false")
+        await self._notify_lifecycle(
+            agent,
+            f"Agent expired",
+            f"Agent `{agent['id']}` has expired and been disabled.",
+        )
+        return True
+
+    async def _handle_max_runs(self, agent: dict) -> bool:
+        if not self._is_max_runs_reached(agent):
+            return False
+        max_runs = agent["max_runs"]
+        self._set_agent_active(agent, False)
+        logger.info(f"Agent '{agent['id']}' reached max_runs={max_runs}, set active: false")
+        await self._notify_lifecycle(
+            agent,
+            f"Agent run limit reached",
+            f"Agent `{agent['id']}` reached its run limit ({max_runs}) and has been disabled.",
+        )
+        return True
+
     def is_due(self, agent: dict) -> bool:
         if not agent.get("active", True):
             return False
         if agent["trigger"] not in ("schedule", "both"):
             return False
+
+        self._check_re_enable(agent)
 
         last_run = self.db.get_last_run(agent["id"])
         now = datetime.now(timezone.utc)
@@ -605,6 +678,48 @@ class Dispatcher:
         if notify == "always" and notify_channel:
             await self._notify(notify_channel, title, output, conv_id)
 
+        await self._handle_max_runs(agent)
+
+    def _set_agent_active(self, agent: dict, active: bool) -> None:
+        path = agent.get("_path")
+        if not path:
+            logger.error(f"Cannot toggle active for '{agent['id']}': no _path")
+            return
+
+        try:
+            content = Path(path).read_text()
+        except Exception as e:
+            logger.error(f"Cannot read agent file for '{agent['id']}': {e}")
+            return
+
+        parts = content.split("---", 2)
+        if len(parts) < 3:
+            logger.error(f"Cannot parse frontmatter for '{agent['id']}'")
+            return
+
+        fm = parts[1]
+        body = parts[2]
+
+        active_str = str(active).lower()
+        if re.search(r"^active:\s*", fm, re.MULTILINE):
+            fm = re.sub(r"^active:\s*\S+", f"active: {active_str}", fm, flags=re.MULTILINE)
+        else:
+            fm = fm.rstrip() + f"\nactive: {active_str}\n"
+
+        new_content = f"---{fm}---{body}"
+
+        try:
+            tmp = Path(path).with_suffix(".tmp")
+            tmp.write_text(new_content)
+            tmp.rename(path)
+        except Exception as e:
+            logger.error(f"Failed to write active toggle for '{agent['id']}': {e}")
+            return
+
+        logger.info(f"Agent '{agent['id']}' active set to {active}")
+        if not active:
+            self.db.set_disabled_at(agent["id"], datetime.now(timezone.utc))
+
     # --- Webhook handling ---
 
     async def handle_webhook(self, request):
@@ -697,22 +812,26 @@ class Dispatcher:
                     )
                     continue
 
-                max_runs = agent.get("max_runs")
-                if max_runs is not None:
-                    window = agent.get("max_runs_window", 3600)
-                    count = self.db.count_runs_in_window(agent["id"], window)
-                    if count >= max_runs:
-                        logger.warning(f"Agent '{agent['id']}' hit max_runs ({max_runs}/{window}s), dropping")
+                if await self._handle_expiry(agent):
+                    continue
+                self._check_re_enable(agent)
+                if await self._handle_max_runs(agent):
+                    continue
+
+                rate_limit = agent.get("rate_limit")
+                if rate_limit is not None:
+                    count, window = parse_rate_limit(rate_limit)
+                    runs_in_window = self.db.count_runs_in_window(agent["id"], window)
+                    if runs_in_window >= count:
+                        logger.warning(f"Agent '{agent['id']}' hit rate_limit ({rate_limit}), dropping")
                         last_warned = self._max_runs_warned_at.get(agent["id"], 0)
                         if time.monotonic() - last_warned > window:
                             self._max_runs_warned_at[agent["id"]] = time.monotonic()
-                            system_channel = self.config.get("system_notification_channel")
-                            if system_channel:
-                                await self._notify(
-                                    system_channel,
-                                    f"Dispatch budget exceeded",
-                                    f"Agent `{agent['id']}` hit max_runs ({max_runs} per {window}s). Events being dropped.",
-                                )
+                            await self._notify_lifecycle(
+                                agent,
+                                f"Rate limit exceeded",
+                                f"Agent `{agent['id']}` hit rate_limit ({rate_limit}). Events being dropped.",
+                            )
                         continue
 
                 await self._dispatch_with_limit(agent, context)
@@ -780,7 +899,7 @@ class Dispatcher:
     async def handle_list_agents(self, request):
         agents = []
         for a in self._agents:
-            agents.append({
+            entry = {
                 "id": a["id"],
                 "title": a["title"],
                 "trigger": a["trigger"],
@@ -789,7 +908,14 @@ class Dispatcher:
                 "rrule": a.get("rrule"),
                 "notify_channel": a.get("notify_channel"),
                 "notify": a.get("notify"),
-            })
+            }
+            if a.get("rate_limit"):
+                entry["rate_limit"] = a["rate_limit"]
+            if a.get("max_runs") is not None:
+                entry["max_runs"] = a["max_runs"]
+            if a.get("expires_at"):
+                entry["expires_at"] = a["expires_at"].isoformat()
+            agents.append(entry)
         return web.json_response({"agents": agents})
 
     async def handle_show_agent(self, request):
@@ -800,9 +926,13 @@ class Dispatcher:
                 safe["prompt_length"] = len(a.get("prompt", ""))
                 last_run = self.db.get_last_run(agent_id)
                 safe["last_run"] = last_run.isoformat() if last_run else None
-                if a.get("max_runs"):
-                    window = a.get("max_runs_window", 3600)
+                if a.get("expires_at"):
+                    safe["expires_at"] = a["expires_at"].isoformat()
+                if a.get("rate_limit"):
+                    count, window = parse_rate_limit(a["rate_limit"])
                     safe["runs_in_window"] = self.db.count_runs_in_window(agent_id, window)
+                if a.get("max_runs") is not None:
+                    safe["total_runs"] = self.db.count_total_runs(agent_id)
                 if a.get("defer_to_cron"):
                     safe["deferred_events"] = self._count_deferred_events(agent_id)
                 return web.json_response({"agent": safe})
@@ -872,12 +1002,17 @@ class Dispatcher:
         # Only webhook agents go through _dispatch_with_limit. This prevents
         # bursty webhooks from blocking scheduled agents.
         for agent in due:
-            max_runs = agent.get("max_runs")
-            if max_runs is not None:
-                window = agent.get("max_runs_window", 3600)
-                count = self.db.count_runs_in_window(agent["id"], window)
-                if count >= max_runs:
-                    logger.warning(f"Agent '{agent['id']}' hit max_runs ({max_runs}/{window}s) on scheduled tick, skipping")
+            if await self._handle_expiry(agent):
+                continue
+            if await self._handle_max_runs(agent):
+                continue
+
+            rate_limit = agent.get("rate_limit")
+            if rate_limit is not None:
+                count, window = parse_rate_limit(rate_limit)
+                runs_in_window = self.db.count_runs_in_window(agent["id"], window)
+                if runs_in_window >= count:
+                    logger.warning(f"Agent '{agent['id']}' hit rate_limit ({rate_limit}) on scheduled tick, skipping")
                     continue
 
             snapshot = None
@@ -907,7 +1042,6 @@ class Dispatcher:
 
         self.db.prune_old_runs(days=7)
         self.db.prune_old_events(hours=self.config.get("dedupe_hours", 24))
-        # Clear stale budget warnings so the dict doesn't grow unboundedly
         self._max_runs_warned_at = {k: v for k, v in self._max_runs_warned_at.items()
                                if k in {a["id"] for a in self._agents}}
 

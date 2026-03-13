@@ -10,7 +10,8 @@ from unittest.mock import patch, AsyncMock, MagicMock
 
 import pytest
 
-from zo_dispatcher.agents import parse_agent_file, compute_next_run
+from zo_dispatcher.agents import parse_agent_file, compute_next_run, parse_rate_limit
+from zo_dispatcher.db import DispatcherDB
 from zo_dispatcher.server import Dispatcher
 
 
@@ -55,8 +56,7 @@ model: byok:test-model
 notify_channel: discord/payments
 notify: always
 active: true
-max_runs: 10
-max_runs_window: 3600
+rate_limit: "10/hour"
 ---
 
 Process the payment: {{ payload }}
@@ -105,8 +105,7 @@ class TestParseAgentFile:
         assert agent["id"] == "webhooks/stripe"
         assert agent["trigger"] == "webhook"
         assert agent["event"] == ["stripe.checkout.session.completed"]
-        assert agent["max_runs"] == 10
-        assert agent["max_runs_window"] == 3600
+        assert agent["rate_limit"] == "10/hour"
 
     def test_inactive_agent(self, agents_dir):
         f = write_agent(agents_dir, "schedules/inactive.md", INACTIVE_AGENT)
@@ -135,7 +134,9 @@ Minimal agent.
         assert agent["model"] is None
         assert agent["persona"] is None
         assert agent["notify_channel"] is None
-        assert agent["max_runs_window"] == 3600  # default
+        assert agent["rate_limit"] is None
+        assert agent["max_runs"] is None
+        assert agent["expires_at"] is None
 
     def test_no_frontmatter(self, agents_dir):
         f = write_agent(agents_dir, "schedules/bad.md", "Just a markdown file.\n")
@@ -373,8 +374,7 @@ event: monitoring
 model: byok:test-model
 notify_channel: discord/general
 notify: always
-max_runs: 20
-max_runs_window: 3600
+rate_limit: "20/hour"
 active: true
 ---
 
@@ -393,7 +393,7 @@ class TestDualTriggerParsing:
         assert agent["trigger"] == "both"
         assert agent["rrule"] == "RRULE:FREQ=MINUTELY;INTERVAL=15"
         assert agent["event"] == ["monitoring"]
-        assert agent["max_runs"] == 20
+        assert agent["rate_limit"] == "20/hour"
 
     def test_both_missing_rrule(self, agents_dir):
         content = """\
@@ -433,6 +433,7 @@ class TestDualTriggerScheduling:
             d.db = type("MockDB", (), {
                 "get_last_run": lambda self, agent_id: datetime(2026, 3, 1, 0, 0, 0, tzinfo=timezone.utc),
                 "mark_run": lambda self, *a, **kw: None,
+                "get_disabled_at": lambda self, agent_id: None,
             })()
 
         agent = {
@@ -440,6 +441,7 @@ class TestDualTriggerScheduling:
             "trigger": "both",
             "rrule": "RRULE:FREQ=MINUTELY;INTERVAL=15",
             "active": True,
+            "max_runs": None,
         }
         with patch("zo_dispatcher.server.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 3, 1, 1, 0, 0, tzinfo=timezone.utc)
@@ -452,12 +454,14 @@ class TestDualTriggerScheduling:
             d = Dispatcher.__new__(Dispatcher)
             d.db = type("MockDB", (), {
                 "get_last_run": lambda self, agent_id: datetime(2026, 3, 1, 0, 0, 0, tzinfo=timezone.utc),
+                "get_disabled_at": lambda self, agent_id: None,
             })()
 
         agent = {
             "id": "webhooks/test",
             "trigger": "webhook",
             "active": True,
+            "max_runs": None,
         }
         result = d.is_due(agent)
         assert result is False
@@ -818,8 +822,8 @@ class TestDeferredTemplateVariable:
         assert "{{ queue_file }}" not in result
         assert "No events queued." in result
 
-    def test_deferred_event_not_counted_against_max_runs(self, tmp_path):
-        """Deferred events should not count against max_runs since no LLM call is made."""
+    def test_deferred_event_not_counted_against_rate_limit(self, tmp_path):
+        """Deferred events should not count against rate_limit since no LLM call is made."""
         d = self._make_dispatcher()
         d.agents_dir = tmp_path
         d._queue_locks = {}
@@ -828,8 +832,7 @@ class TestDeferredTemplateVariable:
             "id": "heartbeats/triage",
             "trigger": "both",
             "defer_to_cron": "skip_if_empty",
-            "max_runs": 5,
-            "max_runs_window": 3600,
+            "rate_limit": "5/hour",
         }
         for i in range(10):
             asyncio.run(
@@ -971,3 +974,467 @@ Should fail.
         assert error is None
         assert agent["defer_to_cron"] == "skip_if_empty"
         assert len(agent["event"]) == 4
+
+
+# --- Lifecycle limits ---
+
+MAX_RUNS_SCHEDULE = """\
+---
+title: Push Reminder
+trigger: schedule
+rrule: "RRULE:FREQ=DAILY;BYHOUR=15"
+max_runs: 1
+active: true
+notify_channel: sms
+notify: always
+---
+
+Remind Jack to push the release branch.
+"""
+
+MAX_RUNS_WEBHOOK = """\
+---
+title: One-Time Webhook
+trigger: webhook
+event: github.release
+max_runs: 1
+active: true
+notify_channel: discord/general
+notify: always
+---
+
+Process the release: {{ payload }}
+"""
+
+MAX_RUNS_BOTH = """\
+---
+title: One-Time Both
+trigger: both
+rrule: "RRULE:FREQ=DAILY;BYHOUR=12"
+event: monitoring
+max_runs: 1
+active: true
+---
+
+Check once then stop.
+"""
+
+EXPIRES_AGENT = """\
+---
+title: Temp Monitor
+trigger: schedule
+rrule: "RRULE:FREQ=HOURLY"
+expires_at: "2026-03-20T00:00:00"
+active: true
+---
+
+Check the thing.
+"""
+
+RATE_LIMIT_AGENT = """\
+---
+title: Rate Limited
+trigger: webhook
+event: github.push
+rate_limit: "5/minute"
+active: true
+---
+
+Handle push: {{ payload }}
+"""
+
+
+class TestLifecycleParsing:
+    def test_max_runs_parsed(self, agents_dir):
+        f = write_agent(agents_dir, "reminders/push.md", MAX_RUNS_SCHEDULE)
+        agent, error = parse_agent_file(f, agents_dir)
+
+        assert error is None
+        assert agent is not None
+        assert agent["max_runs"] == 1
+        assert agent["active"] is True
+
+    def test_max_runs_default_none(self, agents_dir):
+        f = write_agent(agents_dir, "schedules/test-agent.md", VALID_SCHEDULE_AGENT)
+        agent, error = parse_agent_file(f, agents_dir)
+
+        assert error is None
+        assert agent["max_runs"] is None
+
+    def test_max_runs_webhook(self, agents_dir):
+        f = write_agent(agents_dir, "webhooks/one-time.md", MAX_RUNS_WEBHOOK)
+        agent, error = parse_agent_file(f, agents_dir)
+
+        assert error is None
+        assert agent["max_runs"] == 1
+        assert agent["trigger"] == "webhook"
+
+    def test_max_runs_both(self, agents_dir):
+        f = write_agent(agents_dir, "heartbeats/one-time.md", MAX_RUNS_BOTH)
+        agent, error = parse_agent_file(f, agents_dir)
+
+        assert error is None
+        assert agent["max_runs"] == 1
+        assert agent["trigger"] == "both"
+
+    def test_path_stored(self, agents_dir):
+        f = write_agent(agents_dir, "reminders/push.md", MAX_RUNS_SCHEDULE)
+        agent, error = parse_agent_file(f, agents_dir)
+
+        assert error is None
+        assert agent["_path"] == str(f)
+
+    def test_expires_at_parsed(self, agents_dir):
+        f = write_agent(agents_dir, "schedules/temp.md", EXPIRES_AGENT)
+        agent, error = parse_agent_file(f, agents_dir)
+
+        assert error is None
+        assert agent is not None
+        assert agent["expires_at"] == datetime(2026, 3, 20, 0, 0, 0, tzinfo=timezone.utc)
+
+    def test_expires_at_default_none(self, agents_dir):
+        f = write_agent(agents_dir, "schedules/test-agent.md", VALID_SCHEDULE_AGENT)
+        agent, error = parse_agent_file(f, agents_dir)
+
+        assert error is None
+        assert agent["expires_at"] is None
+
+    def test_expires_at_with_timezone(self, agents_dir):
+        content = """\
+---
+title: TZ Expiry
+trigger: schedule
+rrule: "RRULE:FREQ=HOURLY"
+expires_at: "2026-03-20T00:00:00+05:00"
+active: true
+---
+
+Check.
+"""
+        f = write_agent(agents_dir, "schedules/tz.md", content)
+        agent, error = parse_agent_file(f, agents_dir)
+
+        assert error is None
+        assert agent["expires_at"].tzinfo is not None
+
+    def test_invalid_expires_at_rejected(self, agents_dir):
+        content = """\
+---
+title: Bad Expiry
+trigger: schedule
+rrule: "RRULE:FREQ=HOURLY"
+expires_at: "not-a-date"
+active: true
+---
+
+Check.
+"""
+        f = write_agent(agents_dir, "schedules/bad-exp.md", content)
+        agent, error = parse_agent_file(f, agents_dir)
+
+        assert agent is None
+        assert "expires_at" in error
+
+    def test_rate_limit_parsed(self, agents_dir):
+        f = write_agent(agents_dir, "webhooks/rl.md", RATE_LIMIT_AGENT)
+        agent, error = parse_agent_file(f, agents_dir)
+
+        assert error is None
+        assert agent["rate_limit"] == "5/minute"
+
+    def test_rate_limit_default_none(self, agents_dir):
+        f = write_agent(agents_dir, "schedules/test-agent.md", VALID_SCHEDULE_AGENT)
+        agent, error = parse_agent_file(f, agents_dir)
+
+        assert error is None
+        assert agent["rate_limit"] is None
+
+    def test_invalid_rate_limit_rejected(self, agents_dir):
+        content = """\
+---
+title: Bad RL
+trigger: webhook
+event: test
+rate_limit: "10/fortnight"
+active: true
+---
+
+Check.
+"""
+        f = write_agent(agents_dir, "webhooks/bad-rl.md", content)
+        agent, error = parse_agent_file(f, agents_dir)
+
+        assert agent is None
+        assert "rate_limit" in error.lower()
+
+
+class TestParseRateLimit:
+    def test_per_minute(self):
+        count, window = parse_rate_limit("5/minute")
+        assert count == 5
+        assert window == 60
+
+    def test_per_hour(self):
+        count, window = parse_rate_limit("10/hour")
+        assert count == 10
+        assert window == 3600
+
+    def test_per_day(self):
+        count, window = parse_rate_limit("50/day")
+        assert count == 50
+        assert window == 86400
+
+    def test_invalid_unit(self):
+        with pytest.raises(ValueError, match="unit"):
+            parse_rate_limit("10/fortnight")
+
+    def test_invalid_count(self):
+        with pytest.raises(ValueError, match="count"):
+            parse_rate_limit("abc/hour")
+
+    def test_no_slash(self):
+        with pytest.raises(ValueError, match="format"):
+            parse_rate_limit("10hour")
+
+    def test_negative_count(self):
+        with pytest.raises(ValueError, match="non-negative"):
+            parse_rate_limit("-1/hour")
+
+
+class TestSetAgentActive:
+    def _make_dispatcher(self, tmp_path):
+        with patch.object(Dispatcher, '__init__', lambda self, *a, **kw: None):
+            d = Dispatcher.__new__(Dispatcher)
+            d.db = DispatcherDB(str(tmp_path / "test.db"))
+            return d
+
+    def test_deactivate_agent(self, tmp_path):
+        d = self._make_dispatcher(tmp_path)
+        agent_file = tmp_path / "reminders" / "push.md"
+        agent_file.parent.mkdir(parents=True)
+        agent_file.write_text(MAX_RUNS_SCHEDULE)
+
+        agent = {"id": "reminders/push", "_path": str(agent_file), "max_runs": 1}
+        d._set_agent_active(agent, False)
+
+        content = agent_file.read_text()
+        assert "active: false" in content
+        assert "active: true" not in content
+        assert d.db.get_disabled_at("reminders/push") is not None
+
+    def test_reactivate_agent(self, tmp_path):
+        d = self._make_dispatcher(tmp_path)
+        agent_file = tmp_path / "reminders" / "push.md"
+        agent_file.parent.mkdir(parents=True)
+        agent_file.write_text(MAX_RUNS_SCHEDULE.replace("active: true", "active: false"))
+
+        agent = {"id": "reminders/push", "_path": str(agent_file), "max_runs": 1}
+        d._set_agent_active(agent, True)
+
+        content = agent_file.read_text()
+        assert "active: true" in content
+        assert "active: false" not in content
+
+    def test_insert_active_when_absent(self, tmp_path):
+        d = self._make_dispatcher(tmp_path)
+        agent_content = """\
+---
+title: No Active Field
+trigger: schedule
+rrule: "RRULE:FREQ=DAILY;BYHOUR=15"
+max_runs: 1
+---
+
+Do the thing.
+"""
+        agent_file = tmp_path / "reminders" / "no-active.md"
+        agent_file.parent.mkdir(parents=True)
+        agent_file.write_text(agent_content)
+
+        agent = {"id": "reminders/no-active", "_path": str(agent_file), "max_runs": 1}
+        d._set_agent_active(agent, False)
+
+        content = agent_file.read_text()
+        assert "active: false" in content
+
+    def test_body_preserved(self, tmp_path):
+        d = self._make_dispatcher(tmp_path)
+        agent_file = tmp_path / "reminders" / "push.md"
+        agent_file.parent.mkdir(parents=True)
+        agent_file.write_text(MAX_RUNS_SCHEDULE)
+
+        agent = {"id": "reminders/push", "_path": str(agent_file), "max_runs": 1}
+        d._set_agent_active(agent, False)
+
+        content = agent_file.read_text()
+        assert "Remind Jack to push the release branch." in content
+        assert "max_runs: 1" in content
+        assert "title: Push Reminder" in content
+
+    def test_atomic_write(self, tmp_path):
+        d = self._make_dispatcher(tmp_path)
+        agent_file = tmp_path / "reminders" / "push.md"
+        agent_file.parent.mkdir(parents=True)
+        agent_file.write_text(MAX_RUNS_SCHEDULE)
+
+        agent = {"id": "reminders/push", "_path": str(agent_file), "max_runs": 1}
+        d._set_agent_active(agent, False)
+
+        assert not agent_file.with_suffix(".tmp").exists()
+
+    def test_already_inactive_is_noop(self, tmp_path):
+        d = self._make_dispatcher(tmp_path)
+        inactive = MAX_RUNS_SCHEDULE.replace("active: true", "active: false")
+        agent_file = tmp_path / "reminders" / "push.md"
+        agent_file.parent.mkdir(parents=True)
+        agent_file.write_text(inactive)
+
+        agent = {"id": "reminders/push", "_path": str(agent_file), "max_runs": 1}
+        d._set_agent_active(agent, False)
+
+        content = agent_file.read_text()
+        assert content.count("active: false") == 1
+
+    def test_refresh_picks_up_deactivation(self, tmp_path):
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        agent_file = agents_dir / "reminders" / "push.md"
+        agent_file.parent.mkdir(parents=True)
+        agent_file.write_text(MAX_RUNS_SCHEDULE)
+
+        d = self._make_dispatcher(tmp_path)
+        d.agents_dir = agents_dir
+        d._last_parser_error_fingerprint = None
+        d._last_parser_warning_fingerprint = None
+        d.config = {"system_notification_channel": None}
+
+        agents = d.scan_agents()
+        assert len(agents) == 1
+        assert agents[0]["active"] is True
+
+        d._set_agent_active(agents[0], False)
+
+        agents = d.scan_agents()
+        assert len(agents) == 1
+        assert agents[0]["active"] is False
+
+
+# --- Lifecycle behavior tests ---
+
+class TestExpiry:
+    def _make_dispatcher(self):
+        with patch.object(Dispatcher, '__init__', lambda self, *a, **kw: None):
+            return Dispatcher.__new__(Dispatcher)
+
+    def test_not_expired_when_unset(self):
+        d = self._make_dispatcher()
+        agent = {"id": "test/a", "expires_at": None}
+        assert d._is_expired(agent) is False
+
+    def test_expired_in_past(self):
+        d = self._make_dispatcher()
+        agent = {"id": "test/a", "expires_at": datetime(2020, 1, 1, tzinfo=timezone.utc)}
+        assert d._is_expired(agent) is True
+
+    def test_not_expired_in_future(self):
+        d = self._make_dispatcher()
+        agent = {"id": "test/a", "expires_at": datetime(2099, 1, 1, tzinfo=timezone.utc)}
+        assert d._is_expired(agent) is False
+
+    def test_expired_string_in_past(self):
+        d = self._make_dispatcher()
+        agent = {"id": "test/a", "expires_at": "2020-01-01T00:00:00"}
+        assert d._is_expired(agent) is True
+
+    def test_naive_datetime_assumed_utc(self):
+        d = self._make_dispatcher()
+        agent = {"id": "test/a", "expires_at": datetime(2020, 1, 1)}
+        assert d._is_expired(agent) is True
+
+
+class TestMaxRunsReached:
+    def _make_dispatcher(self, tmp_path):
+        with patch.object(Dispatcher, '__init__', lambda self, *a, **kw: None):
+            d = Dispatcher.__new__(Dispatcher)
+            d.db = DispatcherDB(str(tmp_path / "test.db"))
+            return d
+
+    def test_not_reached_when_unset(self, tmp_path):
+        d = self._make_dispatcher(tmp_path)
+        agent = {"id": "test/a", "max_runs": None}
+        assert d._is_max_runs_reached(agent) is False
+
+    def test_not_reached_below_limit(self, tmp_path):
+        d = self._make_dispatcher(tmp_path)
+        d.db.mark_run("test/a", status="success")
+        agent = {"id": "test/a", "max_runs": 5}
+        assert d._is_max_runs_reached(agent) is False
+
+    def test_reached_at_limit(self, tmp_path):
+        d = self._make_dispatcher(tmp_path)
+        for _ in range(5):
+            d.db.mark_run("test/a", status="success")
+        agent = {"id": "test/a", "max_runs": 5}
+        assert d._is_max_runs_reached(agent) is True
+
+    def test_reached_above_limit(self, tmp_path):
+        d = self._make_dispatcher(tmp_path)
+        for _ in range(10):
+            d.db.mark_run("test/a", status="success")
+        agent = {"id": "test/a", "max_runs": 5}
+        assert d._is_max_runs_reached(agent) is True
+
+    def test_max_runs_zero_immediately_reached(self, tmp_path):
+        d = self._make_dispatcher(tmp_path)
+        agent = {"id": "test/a", "max_runs": 0}
+        assert d._is_max_runs_reached(agent) is True
+
+
+class TestReEnable:
+    def _make_dispatcher(self, tmp_path):
+        with patch.object(Dispatcher, '__init__', lambda self, *a, **kw: None):
+            d = Dispatcher.__new__(Dispatcher)
+            d.db = DispatcherDB(str(tmp_path / "test.db"))
+            return d
+
+    def test_re_enable_clears_runs(self, tmp_path):
+        d = self._make_dispatcher(tmp_path)
+        for _ in range(5):
+            d.db.mark_run("test/a", status="success")
+        d.db.set_disabled_at("test/a", datetime.now(timezone.utc))
+
+        agent = {"id": "test/a", "active": True, "max_runs": 5}
+        d._check_re_enable(agent)
+
+        assert d.db.count_total_runs("test/a") == 0
+        assert d.db.get_disabled_at("test/a") is None
+
+    def test_no_re_enable_without_disabled_at(self, tmp_path):
+        d = self._make_dispatcher(tmp_path)
+        for _ in range(5):
+            d.db.mark_run("test/a", status="success")
+
+        agent = {"id": "test/a", "active": True, "max_runs": 5}
+        d._check_re_enable(agent)
+
+        assert d.db.count_total_runs("test/a") == 5
+
+    def test_no_re_enable_without_max_runs(self, tmp_path):
+        d = self._make_dispatcher(tmp_path)
+        d.db.set_disabled_at("test/a", datetime.now(timezone.utc))
+
+        agent = {"id": "test/a", "active": True, "max_runs": None}
+        d._check_re_enable(agent)
+
+        assert d.db.get_disabled_at("test/a") is not None
+
+    def test_no_re_enable_when_inactive(self, tmp_path):
+        d = self._make_dispatcher(tmp_path)
+        for _ in range(5):
+            d.db.mark_run("test/a", status="success")
+        d.db.set_disabled_at("test/a", datetime.now(timezone.utc))
+
+        agent = {"id": "test/a", "active": False, "max_runs": 5}
+        d._check_re_enable(agent)
+
+        assert d.db.count_total_runs("test/a") == 5

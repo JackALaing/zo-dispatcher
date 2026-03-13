@@ -43,11 +43,17 @@ Every agent maps to one of four dispatch patterns. Each pattern corresponds to a
 | **Sentinel** | `trigger: both`, `defer_to_cron: false` | Fires immediately per event AND runs on schedule independently |
 | **Inbox** | `trigger: both`, `defer_to_cron: skip_if_empty` or `always_run` | Queues events, drains on schedule |
 
+Any pattern can be combined with lifecycle limits (`max_runs`, `rate_limit`, `expires_at`) to control how long an agent stays active. For example, `max_runs: 1` makes any agent fire once then auto-disable.
+
 For Cron details, see `references/scheduled-agents.md`. For Trigger, Sentinel, and Inbox details, see `references/webhook-agents.md`.
 
 ### Choosing a Pattern
 
 ```
+Is this a one-time task (reminder, deferred action, single send)?
+├── Yes → Add `max_runs: 1` to any pattern below
+└── No →
+
 Does the agent need external events at all?
 ├── No → Cron (trigger: schedule)
 └── Yes →
@@ -65,7 +71,7 @@ Does the agent need external events at all?
 | Pattern | Cost Driver | Typical Range |
 |---------|-------------|---------------|
 | Cron | 1 LLM call per scheduled tick | Predictable, based on frequency |
-| Trigger | 1 LLM call per event, capped by `max_runs` | Depends on event volume |
+| Trigger | 1 LLM call per event, capped by `rate_limit` | Depends on event volume |
 | Sentinel | 1 LLM call per event + 1 per scheduled tick | Highest (reactive + proactive) |
 | Inbox `skip_if_empty` (heartbeat, 30-min) | ~48 LLM calls/day max, only when events exist | Low-Medium |
 | Inbox `skip_if_empty` (daily) | 1 LLM call/day, only when events exist | Very Low |
@@ -76,7 +82,7 @@ Inbox is dramatically cheaper than Trigger or Sentinel for high-volume sources b
 ### Anti-Patterns
 
 1. **Trigger on high-volume sources.** If a source fires 100+ events/day, use Inbox instead.
-2. **Sentinel or Trigger without `max_runs`.** Any agent with webhook triggers can run away without a budget cap.
+2. **Sentinel or Trigger without `rate_limit`.** Any agent with webhook triggers can run away without a budget cap.
 3. **Inbox with too-short drain interval.** Draining every 1-2 minutes defeats the purpose of batching. Use 15-30 min minimum.
 4. **Single agent trying to do both urgent filtering and batch processing.** Use two agents: Trigger for urgency, Inbox for batching. They can listen to the same events.
 5. **Forgetting transform scripts.** Transforms strip payloads to essentials and can drop events entirely by returning `None` — the cheapest possible filter.
@@ -85,6 +91,7 @@ Inbox is dramatically cheaper than Trigger or Sentinel for high-volume sources b
 8. **Agents writing to the same file without coordination.** Two agents that both write to the same output file on overlapping schedules will clobber each other. Use distinct output files or make one agent depend on the other's output.
 9. **Transform scripts doing LLM-level reasoning.** Transforms are cheap deterministic filters. If your transform needs to "understand" the payload, that work belongs in the agent prompt. Keep transforms to field extraction, keyword matching, and sender filtering.
 10. **Prompts without context bootstrapping.** The agent wakes up blank. If it needs workspace context (files, config, recent state), the prompt must explicitly instruct it to read those files.
+11. **Moving a `max_runs` agent file after enabling it.** The dispatcher caches the file path at scan time. Move before it fires = write-back fails + one extra firing.
 
 ---
 
@@ -122,8 +129,9 @@ Agent IDs are path-based: `schedules/daily-summary`, `webhooks/github-issue`.
 | `notify`          | all                | no       | `errors`       | `always`, `errors`, `never`                                                       |
 | `timeout`         | all                | no       | config default | Seconds for `/zo/ask` timeout                                                     |
 | `retry_delays`    | all                | no       | config default | List of retry delay seconds                                                       |
-| `max_runs`        | all                | no       | unlimited      | Max dispatches in `max_runs_window`                                               |
-| `max_runs_window` | all                | no       | `3600`         | Budget window in seconds                                                          |
+| `rate_limit`      | all                | no       | unlimited      | Per-window throttle: `"N/unit"` where unit is `minute`, `hour`, or `day`. Excess dispatches are dropped (agent stays active). |
+| `max_runs`        | all                | no       | unlimited      | Total dispatches before auto-disable. Count resets when the agent is re-enabled.   |
+| `expires_at`      | all                | no       | —              | ISO 8601 datetime. Agent auto-disables when this time is reached. Naive datetimes treated as UTC. |
 | `defer_to_cron`   | `both` only        | no       | `false`        | `false`, `skip_if_empty`, or `always_run`. Requires `trigger: both`.              |
 | `active`          | all                | no       | `true`         | Set false to disable                                                              |
 
@@ -185,10 +193,9 @@ SMS, email, and Telegram need no config. Set `notify_channel: sms` (or `email`, 
 
 ### Notification Levels
 
-- `notify: always` — notify on success and failure
-- `notify: errors` — only on failure (default)
-- `notify: never` — no notifications
-- If `notify_channel` is not set, the agent runs silently regardless of `notify`
+- `notify: always` — notify on success, failure, and lifecycle events (auto-disable from `max_runs`/`expires_at`). If `notify_channel` is not set, lifecycle notifications fall back to `system_notification_channel` so they are never silently lost.
+- `notify: errors` — only on failure (default). Lifecycle auto-disables are silent (expected behavior, not errors).
+- `notify: never` — no notifications at all, including lifecycle events
 
 ---
 
@@ -200,7 +207,10 @@ Three-layer throttling model:
 
 2. **Global concurrency** (`max_concurrent_dispatches` in config) — Caps total simultaneous `/zo/ask` calls across **webhook agents only**. Scheduled agents bypass the semaphore. Default: 5.
 
-3. **Per-agent dispatch budget** (`max_runs` / `max_runs_window`) — Caps how often a specific agent fires. Excess triggers are dropped with a system notification. **Strongly recommended for webhook and dual-trigger agents.** For `trigger: both`, the budget counts all runs regardless of trigger source.
+3. **Per-agent lifecycle limits** — Three independent controls:
+   - `rate_limit` (`"N/unit"`) — Per-window throttle. Excess dispatches are dropped with a warning. Agent stays active. **Strongly recommended for webhook and dual-trigger agents.** For `trigger: both`, the budget counts all runs regardless of trigger source.
+   - `max_runs` — Lifetime dispatch cap per activation cycle. Agent auto-disables when reached. Count resets when re-enabled (set `active: true`).
+   - `expires_at` — Absolute expiry. Agent auto-disables when the time is reached.
 
 ---
 

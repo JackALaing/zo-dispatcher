@@ -65,8 +65,9 @@ def make_agent(**overrides):
         "notify": "errors",
         "timeout": None,
         "retry_delays": None,
+        "rate_limit": None,
         "max_runs": None,
-        "max_runs_window": 3600,
+        "expires_at": None,
         "prompt": "Do a thing.",
     }
     base.update(overrides)
