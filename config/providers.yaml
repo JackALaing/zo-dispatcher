@@ -1,0 +1,828 @@
+# zo-dispatcher webhook provider blueprints
+# Used by `dispatcher-cli webhook add <provider>` to auto-fill flags.
+#
+# Verification types:
+#   hmac-sha256-hex    - HMAC-SHA256, hex-encoded digest
+#   hmac-sha256-base64 - HMAC-SHA256, base64-encoded digest
+#   hmac-sha1-hex      - HMAC-SHA1, hex-encoded digest
+#   standard-webhooks  - Svix Standard Webhooks (whsec_ secret, webhook-id/timestamp/signature headers)
+#   custom             - Provider-specific verification (requires custom verify() in transform)
+#   token              - Simple token comparison (not HMAC)
+#   none               - No signature verification
+
+providers:
+
+  airtable:
+    display_name: Airtable
+    signature_header: x-airtable-content-mac
+    signature_algo: hmac-sha256-base64
+    signature_prefix: "hmac-sha256="
+    event_type_path: null
+    event_id_path: "$.webhook.id"
+    secret_env: AIRTABLE_WEBHOOK_SECRET
+    docs:
+      webhooks: https://airtable.com/developers/web/api/webhooks-overview
+      verification: https://airtable.com/developers/web/api/webhooks-overview#webhook-notification-delivery
+    events:
+      - TABLE_RECORDS_CHANGED
+      - TABLE_RECORDS_CREATED
+      - TABLE_RECORDS_DELETED
+      - TABLE_FIELDS_CHANGED
+    notes: >
+      Notification payloads are minimal — they contain base/webhook IDs and a
+      timestamp, NOT the actual changes. Must call "list webhook payloads" endpoint
+      to get change details. Secret is the macSecret (base64) returned when creating
+      the webhook. The X-Airtable-Content-MAC header contains "hmac-sha256=<base64>".
+      event_type_path is null because the notification itself doesn't include
+      event types; those are in the payloads fetched separately.
+
+  asana:
+    display_name: Asana
+    signature_header: x-hook-signature
+    signature_algo: hmac-sha256-hex
+    signature_prefix: ""
+    event_type_path: "$.events[0].action"
+    event_id_path: null
+    secret_env: ASANA_WEBHOOK_SECRET
+    docs:
+      webhooks: https://developers.asana.com/docs/webhooks-guide
+      verification: https://developers.asana.com/docs/webhooks-guide#security
+    events:
+      - changed
+      - added
+      - removed
+      - deleted
+      - undeleted
+    notes: >
+      Handshake uses X-Hook-Secret header on first request — must echo it back.
+      Subsequent events use X-Hook-Signature (HMAC-SHA256 hex of body using the
+      X-Hook-Secret as key). Payload contains an "events" array; each event has
+      resource.resource_type (task, project, etc.) and action (changed, added, etc.).
+      No universal event ID — dedup via resource.gid + action + created_at.
+
+  box:
+    display_name: Box
+    signature_header: box-signature-primary
+    signature_algo: hmac-sha256-base64
+    signature_prefix: ""
+    event_type_path: trigger
+    event_id_path: id
+    secret_env: BOX_WEBHOOK_SECRET
+    docs:
+      webhooks: https://developer.box.com/guides/webhooks/
+      events: https://developer.box.com/guides/webhooks/triggers
+      verification: https://developer.box.com/guides/webhooks/v2/signatures-v2
+    events:
+      - FILE.UPLOADED
+      - FILE.PREVIEWED
+      - FILE.DOWNLOADED
+      - FILE.TRASHED
+      - FILE.DELETED
+      - FILE.RESTORED
+      - FILE.COPIED
+      - FILE.MOVED
+      - FILE.LOCKED
+      - FILE.UNLOCKED
+      - FILE.RENAMED
+      - FOLDER.CREATED
+      - FOLDER.RENAMED
+      - FOLDER.DOWNLOADED
+      - FOLDER.RESTORED
+      - FOLDER.DELETED
+      - FOLDER.COPIED
+      - FOLDER.MOVED
+      - FOLDER.TRASHED
+      - COMMENT.CREATED
+      - COMMENT.UPDATED
+      - COMMENT.DELETED
+      - COLLABORATION.CREATED
+      - COLLABORATION.ACCEPTED
+      - COLLABORATION.REJECTED
+      - COLLABORATION.REMOVED
+      - COLLABORATION.UPDATED
+      - SHARED_LINK.CREATED
+      - SHARED_LINK.UPDATED
+      - SHARED_LINK.DELETED
+      - METADATA_INSTANCE.CREATED
+      - METADATA_INSTANCE.UPDATED
+      - METADATA_INSTANCE.DELETED
+      - TASK_ASSIGNMENT.CREATED
+      - TASK_ASSIGNMENT.UPDATED
+      - SIGN_REQUEST.COMPLETED
+      - SIGN_REQUEST.DECLINED
+      - SIGN_REQUEST.EXPIRED
+    notes: >
+      V2 webhooks use dual signatures: BOX-SIGNATURE-PRIMARY and BOX-SIGNATURE-SECONDARY.
+      HMAC-SHA256 base64 of (body + timestamp). Timestamp is in BOX-DELIVERY-TIMESTAMP
+      header; must be within 10 minutes. Check either signature (supports key rotation).
+
+  calendly:
+    display_name: Calendly
+    signature_header: calendly-webhook-signature
+    signature_algo: hmac-sha256-hex
+    signature_prefix: ""
+    event_type_path: event
+    event_id_path: null
+    secret_env: CALENDLY_WEBHOOK_SECRET
+    docs:
+      webhooks: https://developer.calendly.com/api-docs/4c305798a61d3-webhook-signatures
+    events:
+      - invitee.created
+      - invitee.canceled
+      - routing_form_submission.created
+    notes: >
+      Signature header format is "t=timestamp,v1=signature" (similar to Stripe).
+      Sign "timestamp.body" with HMAC-SHA256. Must parse header to extract t and v1.
+      No universal body-level event ID — use payload.uri for resource identification.
+
+  discord:
+    display_name: Discord
+    signature_header: x-signature-ed25519
+    signature_algo: custom
+    signature_prefix: ""
+    event_type_path: type
+    event_id_path: id
+    secret_env: DISCORD_WEBHOOK_SECRET
+    docs:
+      webhooks: https://discord.com/developers/docs/interactions/receiving-and-responding
+    events:
+      - PING
+      - APPLICATION_COMMAND
+      - MESSAGE_COMPONENT
+      - APPLICATION_COMMAND_AUTOCOMPLETE
+      - MODAL_SUBMIT
+    notes: >
+      Uses Ed25519 signature verification (not HMAC). Signed content is
+      "timestamp:body" (timestamp from X-Signature-Timestamp header).
+      Requires custom verify() with Ed25519 library. Payload "type" is an integer
+      (1=PING, 2=APPLICATION_COMMAND, 3=MESSAGE_COMPONENT, etc.).
+      This covers HTTP Interactions — Gateway events use a different format.
+
+  elevenlabs:
+    display_name: ElevenLabs
+    signature_header: webhook-signature
+    signature_algo: standard-webhooks
+    signature_prefix: ""
+    event_type_path: type
+    event_id_path: id
+    secret_env: ELEVENLABS_WEBHOOK_SECRET
+    docs:
+      webhooks: https://elevenlabs.io/docs/overview/administration/webhooks
+    events:
+      - voice.generation.completed
+      - voice.clone.completed
+    notes: >
+      Standard Webhooks (Svix) format. Secret is whsec_<base64>.
+
+  github:
+    display_name: GitHub
+    signature_header: x-hub-signature-256
+    signature_algo: hmac-sha256-hex
+    signature_prefix: "sha256="
+    event_type_path: action
+    event_id_path: null
+    secret_env: GITHUB_WEBHOOK_SECRET
+    docs:
+      webhooks: https://docs.github.com/en/webhooks
+      events: https://docs.github.com/en/webhooks/webhook-events-and-payloads
+      verification: https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries
+    events:
+      - push
+      - pull_request
+      - pull_request_review
+      - issues
+      - issue_comment
+      - create
+      - delete
+      - release
+      - workflow_run
+      - check_run
+      - check_suite
+      - star
+      - fork
+      - ping
+    notes: >
+      Signature is sha256=<hex_digest>. Use timing-safe comparison.
+      event_type_path "action" gives the sub-action (opened, closed, etc.) — NOT
+      the event category. The top-level event category (push, pull_request, etc.)
+      is in the X-GitHub-Event header. Not all events have "action" (e.g. push).
+      No universal body-level event ID — dedup ID is in the X-GitHub-Delivery
+      header, not the payload. TRANSFORM NOTE: The transform script must read the
+      X-GitHub-Event header to determine the event category, since it is not in
+      the payload body. Use headers["x-github-event"] to get values like "push",
+      "pull_request", "issues", etc.
+
+  gitlab:
+    display_name: GitLab
+    signature_header: x-gitlab-token
+    signature_algo: token
+    signature_prefix: ""
+    event_type_path: object_kind
+    event_id_path: null
+    secret_env: GITLAB_WEBHOOK_SECRET
+    docs:
+      webhooks: https://docs.gitlab.com/ee/user/project/integrations/webhooks.html
+      events: https://docs.gitlab.com/ee/user/project/integrations/webhook_events.html
+    events:
+      - push
+      - merge_request
+      - issue
+      - note
+      - pipeline
+      - build
+      - tag_push
+      - release
+      - wiki_page
+      - deployment
+    notes: >
+      Uses simple token comparison (X-Gitlab-Token header == configured secret).
+      NOT HMAC-based. Use timing-safe comparison. No universal body-level event ID
+      across event types. Dedup skipped; low duplicate risk in practice.
+      TRANSFORM NOTE: While object_kind is in the payload body, the X-Gitlab-Event
+      header also carries the event type (e.g. "Push Hook", "Merge Request Hook").
+      The transform script may use either source; object_kind is more concise
+      (e.g. "push", "merge_request") while the header uses human-readable names.
+
+  ifttt:
+    display_name: IFTTT
+    signature_header: null
+    signature_algo: none
+    signature_prefix: ""
+    event_type_path: null
+    event_id_path: null
+    secret_env: IFTTT_WEBHOOK_SECRET
+    docs:
+      webhooks: https://ifttt.com/maker_webhooks
+    events:
+      - trigger_fired
+    notes: >
+      IFTTT Maker Webhooks sends simple POST requests with a JSON body.
+      No signature verification — secure via obscure webhook URL only.
+      Payload format depends on the IFTTT applet configuration. Typically
+      contains value1, value2, value3 fields. This is a webhook platform,
+      not a traditional event provider — event types depend on applet config.
+
+  intercom:
+    display_name: Intercom
+    signature_header: x-hub-signature
+    signature_algo: hmac-sha1-hex
+    signature_prefix: "sha1="
+    event_type_path: topic
+    event_id_path: id
+    secret_env: INTERCOM_WEBHOOK_SECRET
+    docs:
+      webhooks: https://developers.intercom.com/docs/webhooks
+    events:
+      - conversation.user.created
+      - conversation.user.replied
+      - conversation.admin.replied
+      - conversation.admin.assigned
+      - conversation.admin.closed
+      - conversation.admin.opened
+      - conversation.admin.noted
+      - contact.created
+      - contact.updated
+      - contact.deleted
+      - contact.signed_up
+      - user.created
+      - user.deleted
+      - user.email.updated
+      - user.tag.created
+      - user.tag.deleted
+      - visitor.signed_up
+      - company.created
+      - ticket.created
+      - ticket.state.updated
+    notes: >
+      Uses HMAC-SHA1 (not SHA256) with sha1= prefix, similar to GitHub's old
+      X-Hub-Signature format. Payload "topic" is the event type. Webhooks must
+      respond within 10 seconds. Intercom retries failed deliveries.
+
+  linear:
+    display_name: Linear
+    signature_header: linear-signature
+    signature_algo: hmac-sha256-hex
+    signature_prefix: ""
+    event_type_path: type
+    event_id_path: null
+    secret_env: LINEAR_WEBHOOK_SECRET
+    docs:
+      webhooks: https://linear.app/docs/webhooks
+    events:
+      - Issue
+      - IssueComment
+      - Project
+      - ProjectUpdate
+      - Cycle
+      - Label
+      - Reaction
+      - Attachment
+    notes: >
+      Event type is the resource name (Issue, Project, etc.).
+      action field contains create/update/remove. data.id is the entity ID
+      (not a unique delivery ID) — two updates to the same entity share
+      the same data.id, so it is not suitable for dedup. Set to null.
+
+  notion:
+    display_name: Notion
+    signature_header: x-notion-signature
+    signature_algo: hmac-sha256-hex
+    signature_prefix: "sha256="
+    event_type_path: type
+    event_id_path: entity.id
+    secret_env: NOTION_WEBHOOK_SECRET
+    docs:
+      webhooks: https://developers.notion.com/docs/webhooks
+    events:
+      - page.created
+      - page.content_updated
+      - page.properties_updated
+      - page.deleted
+      - page.undeleted
+      - database.created
+      - database.content_updated
+      - database.properties_updated
+      - database.deleted
+      - database.undeleted
+      - comment.created
+      - comment.updated
+      - comment.deleted
+    notes: >
+      Notion webhooks are relatively new (2025). Signature includes sha256= prefix.
+
+  openai:
+    display_name: OpenAI
+    signature_header: webhook-signature
+    signature_algo: standard-webhooks
+    signature_prefix: ""
+    event_type_path: type
+    event_id_path: id
+    secret_env: OPENAI_WEBHOOK_SECRET
+    docs:
+      webhooks: https://platform.openai.com/docs/guides/webhooks
+      events: https://platform.openai.com/docs/guides/webhooks/events
+    events:
+      - fine_tuning.job.succeeded
+      - fine_tuning.job.failed
+      - batch.completed
+      - batch.failed
+      - response.completed
+    notes: >
+      Standard Webhooks (Svix) format. Headers: webhook-id, webhook-timestamp,
+      webhook-signature. Secret is whsec_<base64>.
+
+  oura:
+    display_name: Oura
+    signature_header: null
+    signature_algo: none
+    signature_prefix: ""
+    event_type_path: event_type
+    event_id_path: null
+    secret_env: OURA_WEBHOOK_SECRET
+    docs:
+      webhooks: https://cloud.ouraring.com/v2/docs
+    events:
+      - daily_activity
+      - daily_readiness
+      - daily_sleep
+      - daily_spo2
+      - daily_stress
+      - heart_rate
+      - sleep
+      - session
+      - tag
+      - workout
+      - ring_configuration
+    notes: >
+      No HMAC signature verification. Webhook URL is registered via API.
+      Oura sends minimal notifications; must call the data API to get full details.
+      Subscriptions may require re-registration periodically.
+
+  paddle:
+    display_name: Paddle
+    signature_header: paddle-signature
+    signature_algo: hmac-sha256-hex
+    signature_prefix: ""
+    event_type_path: event_type
+    event_id_path: event_id
+    secret_env: PADDLE_WEBHOOK_SECRET
+    docs:
+      webhooks: https://developer.paddle.com/webhooks/overview
+      verification: https://developer.paddle.com/webhooks/signature-verification
+    events:
+      - subscription.created
+      - subscription.updated
+      - subscription.canceled
+      - transaction.completed
+      - transaction.payment_failed
+      - customer.created
+      - customer.updated
+    notes: >
+      Paddle-Signature header contains ts=timestamp;h1=hash.
+      Secret starts with pdl_ntfset_. Sign "timestamp:body" with HMAC-SHA256.
+
+  postmark:
+    display_name: Postmark
+    signature_header: null
+    signature_algo: custom
+    signature_prefix: ""
+    event_type_path: RecordType
+    event_id_path: MessageID
+    secret_env: POSTMARK_WEBHOOK_SECRET
+    docs:
+      webhooks: https://postmarkapp.com/developer/webhooks/webhooks-overview
+    events:
+      - Bounce
+      - Delivery
+      - Open
+      - Click
+      - SpamComplaint
+      - SubscriptionChange
+    notes: >
+      Uses Basic Auth or token in webhook URL (not HMAC signatures).
+      Requires custom verify() or allow_unsigned=true with URL-based auth.
+
+  readwise:
+    display_name: Readwise
+    signature_header: null
+    signature_algo: custom
+    signature_prefix: ""
+    event_type_path: "$.event_type"
+    event_id_path: id
+    secret_env: READWISE_WEBHOOK_SECRET
+    docs:
+      webhooks: https://docs.readwise.io/readwise/docs/webhooks
+    events:
+      - readwise.highlight.created
+      - reader.any_document.created
+      - reader.feed_document.created
+      - reader.non_feed_document.created
+      - reader.document.tags_updated
+      - reader.document.finished
+      - reader.document.archived
+      - reader.document.moved_to_later
+      - reader.document.moved_to_inbox
+      - reader.document.shortlisted
+    notes: >
+      No HMAC signature. Secret is sent inside the JSON payload body as "secret" field.
+      Requires custom verify() function in transform script.
+
+  replicate:
+    display_name: Replicate
+    signature_header: webhook-signature
+    signature_algo: standard-webhooks
+    signature_prefix: ""
+    event_type_path: status
+    event_id_path: id
+    secret_env: REPLICATE_WEBHOOK_SECRET
+    docs:
+      webhooks: https://replicate.com/docs/webhooks
+    events:
+      - starting
+      - processing
+      - succeeded
+      - failed
+      - canceled
+    notes: >
+      Standard Webhooks (Svix) format. Webhook URL is set per-prediction,
+      not globally. Events are prediction lifecycle statuses.
+
+  resend:
+    display_name: Resend
+    signature_header: webhook-signature
+    signature_algo: standard-webhooks
+    signature_prefix: ""
+    event_type_path: type
+    event_id_path: "$.data.email_id"
+    secret_env: RESEND_WEBHOOK_SECRET
+    docs:
+      webhooks: https://resend.com/docs/webhooks
+    events:
+      - email.sent
+      - email.delivered
+      - email.delivery_delayed
+      - email.bounced
+      - email.complained
+      - email.opened
+      - email.clicked
+    notes: >
+      Standard Webhooks (Svix) format. Secret is whsec_<base64>.
+
+  sendgrid:
+    display_name: SendGrid
+    signature_header: x-twilio-email-event-webhook-signature
+    signature_algo: custom
+    signature_prefix: ""
+    event_type_path: "$.event"
+    event_id_path: sg_message_id
+    secret_env: SENDGRID_WEBHOOK_SECRET
+    docs:
+      webhooks: https://www.twilio.com/docs/sendgrid/for-developers/tracking-events/event
+      verification: https://www.twilio.com/docs/sendgrid/for-developers/tracking-events/getting-started-event-webhook-security-features
+    events:
+      - delivered
+      - bounce
+      - open
+      - click
+      - dropped
+      - deferred
+      - spam_report
+      - unsubscribe
+    notes: >
+      Uses ECDSA (not HMAC) with public key verification. Timestamp in
+      X-Twilio-Email-Event-Webhook-Timestamp header. Requires custom verify().
+      Payload is an array of event objects — event_id_path applies per element.
+
+  sentry:
+    display_name: Sentry
+    signature_header: sentry-hook-signature
+    signature_algo: hmac-sha256-hex
+    signature_prefix: ""
+    event_type_path: action
+    event_id_path: null
+    secret_env: SENTRY_WEBHOOK_SECRET
+    docs:
+      webhooks: https://docs.sentry.io/organization/integrations/integration-platform/webhooks/
+      verification: https://docs.sentry.io/organization/integrations/integration-platform/webhooks/#sentry-hook-signature
+    events:
+      - installation
+      - event_alert
+      - issue
+      - metric_alert
+      - error
+      - comment
+    notes: >
+      Sentry-Hook-Signature is HMAC-SHA256 hex of the request body using your
+      client secret. Resource type is in the Sentry-Hook-Resource header (not
+      the body). "action" field in body gives the sub-action (e.g. "created").
+      Combine Sentry-Hook-Resource header + action for full event identification.
+      No universal body-level event ID. TRANSFORM NOTE: The transform script must
+      read the Sentry-Hook-Resource header to determine the resource type (e.g.
+      "installation", "event_alert", "issue", "metric_alert", "error", "comment").
+      Use headers["sentry-hook-resource"] combined with the body's "action" field
+      to construct the full event type (e.g. "issue.created").
+
+  shopify:
+    display_name: Shopify
+    signature_header: x-shopify-hmac-sha256
+    signature_algo: hmac-sha256-base64
+    signature_prefix: ""
+    event_type_path: null
+    event_id_path: id
+    secret_env: SHOPIFY_WEBHOOK_SECRET
+    docs:
+      webhooks: https://shopify.dev/docs/apps/build/webhooks
+      events: https://shopify.dev/docs/api/admin-rest/current/resources/webhook
+      verification: https://shopify.dev/docs/apps/build/webhooks/subscribe/https#step-5-verify-the-webhook
+    events:
+      - orders/create
+      - orders/paid
+      - orders/fulfilled
+      - orders/cancelled
+      - products/create
+      - products/update
+      - products/delete
+      - customers/create
+      - customers/update
+      - carts/create
+      - carts/update
+      - refunds/create
+    notes: >
+      HMAC-SHA256 with base64 encoding. Topic (event type) comes from the
+      X-Shopify-Topic header, NOT the payload body — event_type_path is null.
+      Secret is the API secret key from Partners dashboard. TRANSFORM NOTE: The
+      transform script must read the X-Shopify-Topic header to determine the event
+      type (e.g. "orders/create", "products/update"). Use
+      headers["x-shopify-topic"]. The X-Shopify-Shop-Domain header also provides
+      the originating shop.
+
+  slack:
+    display_name: Slack
+    signature_header: x-slack-signature
+    signature_algo: hmac-sha256-hex
+    signature_prefix: "v0="
+    event_type_path: "$.event.type"
+    event_id_path: event_id
+    secret_env: SLACK_WEBHOOK_SECRET
+    docs:
+      webhooks: https://api.slack.com/events/url_verification
+      events: https://api.slack.com/events
+      verification: https://api.slack.com/authentication/verifying-requests-from-slack
+    events:
+      - message
+      - app_mention
+      - reaction_added
+      - reaction_removed
+      - channel_created
+      - member_joined_channel
+      - file_shared
+      - app_home_opened
+    notes: >
+      Signed content is "v0:timestamp:body" (timestamp from X-Slack-Request-Timestamp).
+      Must verify timestamp is within 5 minutes to prevent replay attacks.
+      URL verification challenge must be handled on setup.
+
+  stripe:
+    display_name: Stripe
+    signature_header: stripe-signature
+    signature_algo: hmac-sha256-hex
+    signature_prefix: ""
+    event_type_path: type
+    event_id_path: id
+    secret_env: STRIPE_WEBHOOK_SECRET
+    docs:
+      webhooks: https://docs.stripe.com/webhooks
+      events: https://docs.stripe.com/api/events/types
+      verification: https://docs.stripe.com/webhooks/signatures
+    events:
+      - checkout.session.completed
+      - payment_intent.succeeded
+      - payment_intent.payment_failed
+      - customer.subscription.created
+      - customer.subscription.updated
+      - customer.subscription.deleted
+      - invoice.paid
+      - invoice.payment_failed
+      - charge.succeeded
+      - charge.refunded
+    notes: >
+      Stripe-Signature header contains t=timestamp,v1=signature.
+      Secret starts with whsec_. Must parse header to extract t and v1,
+      then sign "timestamp.body" with HMAC-SHA256. Use raw request body.
+
+  tally:
+    display_name: Tally
+    signature_header: tally-signature
+    signature_algo: hmac-sha256-base64
+    signature_prefix: ""
+    event_type_path: eventType
+    event_id_path: eventId
+    secret_env: TALLY_WEBHOOK_SECRET
+    docs:
+      webhooks: https://tally.so/help/webhooks
+    events:
+      - FORM_RESPONSE
+    notes: >
+      HMAC-SHA256 with base64 encoding. Tally-Signature header contains the hash.
+      Endpoints must respond within 10 seconds. Failed deliveries retry at
+      5m, 30m, 1h, 6h, and 1d intervals. Currently only FORM_RESPONSE event.
+
+  telegram:
+    display_name: Telegram
+    signature_header: x-telegram-bot-api-secret-token
+    signature_algo: token
+    signature_prefix: ""
+    event_type_path: null
+    event_id_path: update_id
+    secret_env: TELEGRAM_WEBHOOK_SECRET
+    docs:
+      webhooks: https://core.telegram.org/bots/api#setwebhook
+    events:
+      - message
+      - edited_message
+      - channel_post
+      - edited_channel_post
+      - callback_query
+      - inline_query
+      - chosen_inline_result
+      - shipping_query
+      - pre_checkout_query
+      - poll
+      - poll_answer
+      - my_chat_member
+      - chat_member
+      - chat_join_request
+      - chat_boost
+      - removed_chat_boost
+      - message_reaction
+      - message_reaction_count
+    notes: >
+      Uses simple token comparison via secret_token parameter in setWebhook.
+      Token appears in X-Telegram-Bot-Api-Secret-Token header. Event type is
+      determined by WHICH field is present in the Update object (message,
+      callback_query, etc.) — no single event_type field. event_type_path is null;
+      must check for presence of each field. Only ports 443, 80, 88, 8443 supported.
+      TRANSFORM NOTE: The transform script must infer the event type by checking
+      which key exists in the payload (e.g. if "message" key exists, it's a message
+      event; if "callback_query" exists, it's a callback query). There is no single
+      field or header that gives the event type directly.
+
+  todoist:
+    display_name: Todoist
+    signature_header: x-todoist-hmac-sha256
+    signature_algo: hmac-sha256-base64
+    signature_prefix: ""
+    event_type_path: event_name
+    event_id_path: event_data.id
+    secret_env: TODOIST_WEBHOOK_SECRET
+    docs:
+      webhooks: https://developer.todoist.com/api/v1/#tag/Webhooks
+    events:
+      - item:added
+      - item:updated
+      - item:completed
+      - item:uncompleted
+      - item:deleted
+      - note:added
+      - note:updated
+      - note:deleted
+      - project:added
+      - project:updated
+      - project:archived
+      - project:unarchived
+      - project:deleted
+      - section:added
+      - section:updated
+      - section:archived
+      - section:unarchived
+      - section:deleted
+      - label:added
+      - label:updated
+      - label:deleted
+      - filter:added
+      - filter:updated
+      - filter:deleted
+      - reminder:fired
+    notes: >
+      HMAC-SHA256 with base64 encoding. Event names use resource:verb format.
+      X-Todoist-Delivery-ID header provides a unique delivery ID for dedup.
+
+  twilio:
+    display_name: Twilio
+    signature_header: x-twilio-signature
+    signature_algo: custom
+    signature_prefix: ""
+    event_type_path: "$.EventType"
+    event_id_path: MessageSid
+    secret_env: TWILIO_WEBHOOK_SECRET
+    docs:
+      webhooks: https://www.twilio.com/docs/usage/webhooks
+      verification: https://www.twilio.com/docs/usage/security#validating-requests
+    events:
+      - incoming-message
+      - message-status
+      - voice-status
+      - transcription
+    notes: >
+      Uses HMAC-SHA1 of the full callback URL + sorted POST params.
+      Requires custom verify() due to URL-dependent signature.
+
+  typeform:
+    display_name: Typeform
+    signature_header: typeform-signature
+    signature_algo: hmac-sha256-base64
+    signature_prefix: "sha256="
+    event_type_path: event_type
+    event_id_path: event_id
+    secret_env: TYPEFORM_WEBHOOK_SECRET
+    docs:
+      webhooks: https://www.typeform.com/developers/webhooks/
+      verification: https://www.typeform.com/developers/webhooks/secure-your-webhooks/
+    events:
+      - form_response
+    notes: >
+      HMAC-SHA256 with base64 encoding, prefixed with "sha256=".
+      Must use raw request body bytes for hashing. Use timing-safe comparison.
+      HTTPS recommended (self-signed certs not supported). No static IPs —
+      Typeform uses AWS with dynamic IPs.
+
+  vercel:
+    display_name: Vercel
+    signature_header: x-vercel-signature
+    signature_algo: hmac-sha1-hex
+    signature_prefix: ""
+    event_type_path: type
+    event_id_path: id
+    secret_env: VERCEL_WEBHOOK_SECRET
+    docs:
+      webhooks: https://vercel.com/docs/observability/webhooks
+      events: https://vercel.com/docs/observability/webhooks#event-types
+    events:
+      - deployment.created
+      - deployment.succeeded
+      - deployment.ready
+      - deployment.error
+      - deployment.canceled
+      - project.created
+      - project.removed
+      - domain.created
+    notes: >
+      Uses HMAC-SHA1 (not SHA256). Hex-encoded. Uses raw request body.
+
+  zapier:
+    display_name: Zapier
+    signature_header: null
+    signature_algo: none
+    signature_prefix: ""
+    event_type_path: null
+    event_id_path: null
+    secret_env: ZAPIER_WEBHOOK_SECRET
+    docs:
+      webhooks: https://docs.zapier.com/platform/home
+    events:
+      - zap_triggered
+    notes: >
+      Zapier is a webhook platform, not a traditional event provider. "Webhooks
+      by Zapier" can send POST requests to your endpoint with custom payloads.
+      No signature verification — secure via obscure webhook URL only. Payload
+      format depends entirely on the Zap configuration. No standard event types.

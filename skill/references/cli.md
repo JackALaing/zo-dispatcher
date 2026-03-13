@@ -7,6 +7,10 @@
 ## Webhook Commands
 
 ```bash
+# Known providers — auto-fills all flags from providers.yaml blueprint
+dispatcher-cli webhook add <source>
+
+# Unknown/custom providers — manual flags required
 dispatcher-cli webhook add <source> \
   [--secret-env ENV_VAR] \
   [--signature-header HEADER] \
@@ -24,13 +28,22 @@ dispatcher-cli webhook test <source> [--payload '{"type": "test"}']
 dispatcher-cli webhook disable <source>
 dispatcher-cli webhook enable <source>
 dispatcher-cli webhook stats <source> [--window DURATION] [--alert-threshold N]
+dispatcher-cli webhook providers
 ```
+
+### Blueprint Auto-Fill
+
+If `<source>` matches a provider in `config/providers.yaml`, all webhook configuration flags are auto-filled from the blueprint. No flags needed — just `dispatcher-cli webhook add github`.
+
+CLI flags override blueprint values for custom cases. Unknown sources fall back to the manual flow (all flags required).
+
+Use `dispatcher-cli webhook providers` to list all available blueprints.
 
 ### Key Options
 
 | Option               | Description                                                                                           |
 | -------------------- | ----------------------------------------------------------------------------------------------------- |
-| `--secret-env`       | Environment variable holding the webhook secret. Required unless `--allow-unsigned`.                  |
+| `--secret-env`       | Environment variable holding the webhook secret. Required unless `--allow-unsigned`. Blueprint default: `<SOURCE>_WEBHOOK_SECRET`. |
 | `--signature-header` | HTTP header containing the signature (e.g., `x-hub-signature-256`).                                   |
 | `--signature-algo`   | Verification algorithm: `hmac-sha256-hex` (default), `hmac-sha256-base64`, `hmac-sha1-hex`, `custom`. |
 | `--signature-prefix` | Prefix to strip from signature header value before comparison (e.g., `sha256=`).                      |

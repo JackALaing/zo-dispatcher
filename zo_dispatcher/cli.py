@@ -12,6 +12,7 @@ Usage:
     dispatcher-cli webhook disable <source>
     dispatcher-cli webhook enable <source>
     dispatcher-cli webhook stats <source> [--window DURATION] [--alert-threshold N]
+    dispatcher-cli webhook providers
 
     dispatcher-cli channel list
     dispatcher-cli channel show <name>
@@ -31,11 +32,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
+import yaml
 
 from zo_dispatcher.db import DispatcherDB
 from zo_dispatcher.agents import parse_agent_file, compute_next_run
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "config.json"
+PROVIDERS_PATH = Path(__file__).resolve().parent.parent / "config" / "providers.yaml"
 DISPATCHER_URL = "http://localhost:8790"
 LOKI_URL = "http://localhost:3100"
 
@@ -43,6 +46,15 @@ LOKI_URL = "http://localhost:3100"
 def load_config() -> dict:
     with open(CONFIG_PATH) as f:
         return json.load(f)
+
+
+def load_providers() -> dict:
+    """Load provider blueprints from providers.yaml. Returns {name: config} dict."""
+    if not PROVIDERS_PATH.exists():
+        return {}
+    with open(PROVIDERS_PATH) as f:
+        data = yaml.safe_load(f)
+    return data.get("providers", {}) if data else {}
 
 
 def get_db(config: dict):
@@ -121,12 +133,35 @@ def cmd_webhook_add(args, config):
         print(f"Error: Source '{args.source}' already exists. Remove it first.", file=sys.stderr)
         sys.exit(1)
 
-    algo = args.signature_algo
-    if args.secret_env and not algo:
+    # Load blueprint if available — CLI flags override blueprint values
+    providers = load_providers()
+    blueprint = providers.get(args.source, {})
+    if blueprint:
+        print(f"Using blueprint for '{args.source}'")
+
+    def resolve(cli_val, blueprint_key, default=None):
+        """CLI flag wins over blueprint, blueprint wins over default."""
+        if cli_val is not None:
+            return cli_val
+        bp_val = blueprint.get(blueprint_key)
+        # Treat YAML null as None
+        if bp_val is not None:
+            return str(bp_val) if not isinstance(bp_val, str) else bp_val
+        return default
+
+    secret_env = resolve(args.secret_env, "secret_env")
+    signature_header = resolve(args.signature_header, "signature_header")
+    signature_prefix = resolve(args.signature_prefix, "signature_prefix", "")
+    event_type_path = resolve(args.event_type_path, "event_type_path")
+    event_id_path = resolve(args.event_id_path, "event_id_path")
+    transform_script = resolve(args.transform_script, "transform_script")
+
+    algo = resolve(args.signature_algo, "signature_algo")
+    if secret_env and not algo:
         algo = "hmac-sha256-hex"
 
     allow_unsigned = getattr(args, "allow_unsigned", False)
-    if not args.secret_env and algo != "custom":
+    if not secret_env and algo != "custom":
         if not allow_unsigned:
             print(f"Error: No --secret-env set for '{args.source}'. "
                   f"Pass --allow-unsigned to accept unsigned webhooks (not recommended).", file=sys.stderr)
@@ -138,16 +173,20 @@ def cmd_webhook_add(args, config):
         "INSERT INTO webhooks (source, secret_env, signature_header, signature_algo, "
         "signature_prefix, event_type_path, event_id_path, transform_script, allow_unsigned, created_at, updated_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (args.source, args.secret_env, args.signature_header, algo,
-         args.signature_prefix or "", args.event_type_path, args.event_id_path,
-         args.transform_script, 1 if allow_unsigned else 0, now, now)
+        (args.source, secret_env, signature_header, algo,
+         signature_prefix, event_type_path, event_id_path,
+         transform_script, 1 if allow_unsigned else 0, now, now)
     )
     db.commit()
     print(f"Added webhook source: {args.source}")
     if algo:
         print(f"  Signature: {algo}")
-    if args.secret_env:
-        print(f"  Secret env: {args.secret_env}")
+    if secret_env:
+        print(f"  Secret env: {secret_env}")
+    if signature_header:
+        print(f"  Header: {signature_header}")
+    if event_type_path:
+        print(f"  Event type path: {event_type_path}")
 
 
 def cmd_webhook_update(args, config):
@@ -251,6 +290,18 @@ def cmd_webhook_test(args, config):
     except requests.ConnectionError:
         print("Error: Cannot connect to dispatcher. Is it running?", file=sys.stderr)
         sys.exit(1)
+
+
+def cmd_webhook_providers(args, config):
+    providers = load_providers()
+    if not providers:
+        print("No providers.yaml found.")
+        return
+    print(f"{len(providers)} providers available:\n")
+    for name, p in sorted(providers.items()):
+        algo = p.get("signature_algo", "?")
+        events_count = len(p.get("events", []))
+        print(f"  {name:<20} {p.get('display_name', name):<20} algo={algo}  ({events_count} events)")
 
 
 def cmd_webhook_disable(args, config):
@@ -574,6 +625,8 @@ def main():
     wh_stats.add_argument("--alert-threshold", dest="alert_threshold", type=int, default=None,
                           help="Alert if rejected count >= N. Sends notification and exits with code 1.")
 
+    wh_sub.add_parser("providers", help="List available provider blueprints from providers.yaml")
+
     # channel
     ch = sub.add_parser("channel")
     ch_sub = ch.add_subparsers(dest="action")
@@ -608,6 +661,7 @@ def main():
         ("webhook", "disable"): cmd_webhook_disable,
         ("webhook", "enable"): cmd_webhook_enable,
         ("webhook", "stats"): cmd_webhook_stats,
+        ("webhook", "providers"): cmd_webhook_providers,
         ("channel", "list"): cmd_channel_list,
         ("channel", "show"): cmd_channel_show,
         ("agent", "list"): cmd_agent_list,

@@ -4,6 +4,14 @@
 
 ### Step 1: Register the Webhook Source
 
+For known providers (listed in `dispatcher-cli webhook providers`), registration is zero-flag:
+
+```bash
+dispatcher-cli webhook add github
+```
+
+This auto-fills all configuration from `config/providers.yaml`. CLI flags override blueprint values for custom cases. For unknown providers, specify flags manually:
+
 ```bash
 dispatcher-cli webhook add <source> \
   --secret-env <ENV_VAR_NAME> \

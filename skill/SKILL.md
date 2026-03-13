@@ -14,6 +14,7 @@ Key paths (relative to the zo-dispatcher install directory):
 
 - Agent definitions: configured via `agents_dir` in `config/config.json`
 - Config: `config/config.json`
+- Provider blueprints: `config/providers.yaml` (auto-fills `webhook add` flags for known providers)
 - State: SQLite database at path configured via `db_path`
 - Logs: `/dev/shm/zo-dispatcher.log` (indexed by Loki)
 - Transforms: configured via `transforms_dir`
