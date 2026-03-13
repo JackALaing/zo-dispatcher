@@ -52,6 +52,13 @@ def _is_session_pool_error(error_text: str) -> bool:
     return any(marker in lower for marker in SESSION_POOL_ERROR_MARKERS)
 
 
+def compute_jitter(agent_id: str, max_jitter: int) -> float:
+    if max_jitter <= 0:
+        return 0.0
+    h = int(hashlib.sha256(agent_id.encode()).hexdigest()[:8], 16)
+    return h % max_jitter
+
+
 class Dispatcher:
     def __init__(self, config: dict):
         self.config = config
@@ -882,6 +889,11 @@ class Dispatcher:
                     logger.info(f"Agent '{agent['id']}' deferred queue empty, skipping")
                     continue
                 queue_file = snapshot if snapshot else "No events queued."
+
+            jitter = compute_jitter(agent["id"], self.config.get("jitter_max_seconds", 0))
+            if jitter > 0:
+                logger.debug(f"Jitter: sleeping {jitter:.0f}s before dispatching '{agent['id']}'")
+                await asyncio.sleep(jitter)
 
             try:
                 await self.dispatch_agent(agent, queue_file=queue_file)

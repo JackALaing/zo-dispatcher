@@ -7,6 +7,7 @@
   "transforms_dir": "./transforms",
   "webhook_port": 8790,
   "max_concurrent_dispatches": 5,
+  "jitter_max_seconds": 30,
   "zo_ask_timeout_seconds": 1800,
   "empty_response_retry_delays": [15, 30, 60],
   "session_pool_retry_delays": [15, 30, 60, 120],

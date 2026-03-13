@@ -258,6 +258,7 @@ dispatcher-cli agent run webhooks/readwise-daily
 | `transforms_dir`              | `./transforms`            | Path to transform scripts directory                                                   |
 | `webhook_port`                | `8790`                    | HTTP server port                                                                      |
 | `max_concurrent_dispatches`   | `5`                       | Global cap on simultaneous `/zo/ask` calls                                            |
+| `jitter_max_seconds`          | `0`                       | Deterministic dispatch jitter for scheduled agents. Each agent sleeps `hash(id) % jitter_max_seconds` before dispatch. Spreads simultaneous due agents across a window. `0` = disabled. Keep below the agent's cron frequency to avoid skips. |
 | `zo_ask_timeout_seconds`      | `1800`                    | Default timeout for `/zo/ask` calls                                                   |
 | `empty_response_retry_delays` | `[15, 30, 60]`            | Retry delays for empty/failed responses                                               |
 | `session_pool_retry_delays`   | `[15, 30, 60, 120]`       | Retry delays for session pool errors                                                  |
