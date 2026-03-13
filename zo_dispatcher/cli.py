@@ -13,6 +13,8 @@ Usage:
     dispatcher-cli webhook enable <source>
     dispatcher-cli webhook stats <source> [--window DURATION] [--alert-threshold N]
     dispatcher-cli webhook providers
+    dispatcher-cli webhook rotate <source>
+    dispatcher-cli webhook rotate-cleanup <source>
 
     dispatcher-cli channel list
     dispatcher-cli channel show <name>
@@ -24,6 +26,7 @@ Usage:
 
 import argparse
 import json
+import os
 import re
 import sys
 import urllib.parse
@@ -432,6 +435,110 @@ def cmd_webhook_stats(args, config):
         sys.exit(1)
 
 
+ZO_SECRETS_PATH = Path("/root/.zo_secrets")
+
+
+def _read_secret_value(env_name: str) -> str | None:
+    import subprocess
+    result = subprocess.run(
+        ["bash", "-c", f"source {ZO_SECRETS_PATH} && echo -n \"${{{env_name}}}\""],
+        capture_output=True, text=True
+    )
+    val = result.stdout
+    return val if val else None
+
+
+def _write_secret(env_name: str, value: str):
+    with open(ZO_SECRETS_PATH, "a") as f:
+        f.write(f'\nexport {env_name}="{value}"\n')
+
+
+def _remove_secret(env_name: str):
+    lines = ZO_SECRETS_PATH.read_text().splitlines(keepends=True)
+    filtered = [l for l in lines if not l.strip().startswith(f"export {env_name}=")]
+    ZO_SECRETS_PATH.write_text("".join(filtered))
+
+
+def cmd_webhook_rotate(args, config):
+    db = get_db(config)
+    row = db.execute("SELECT * FROM webhooks WHERE source = ?", (args.source,)).fetchone()
+    if not row:
+        print(f"Error: Source '{args.source}' not found.", file=sys.stderr)
+        sys.exit(1)
+
+    cols = [d[0] for d in db.execute("SELECT * FROM webhooks LIMIT 0").description]
+    current = dict(zip(cols, row))
+    secret_env = current.get("secret_env", "")
+
+    if not secret_env:
+        print(f"Error: Source '{args.source}' has no secret_env configured.", file=sys.stderr)
+        sys.exit(1)
+
+    primary = secret_env.split(",")[0].strip()
+    if "," in secret_env:
+        print(f"Error: Rotation already in progress (secret_env={secret_env}). "
+              f"Run 'webhook rotate-cleanup {args.source}' first.", file=sys.stderr)
+        sys.exit(1)
+
+    current_value = _read_secret_value(primary)
+    if not current_value:
+        print(f"Error: Could not read current value of {primary}.", file=sys.stderr)
+        sys.exit(1)
+
+    old_name = f"{primary}_OLD"
+    _write_secret(old_name, current_value)
+
+    new_secret_env = f"{primary},{old_name}"
+    now = datetime.now(timezone.utc).isoformat()
+    db.execute("UPDATE webhooks SET secret_env = ?, updated_at = ? WHERE source = ?",
+               (new_secret_env, now, args.source))
+    db.commit()
+
+    print(f"Rotation started for '{args.source}':")
+    print(f"  Copied {primary} → {old_name}")
+    print(f"  secret_env: {primary} → {new_secret_env}")
+    print()
+    print("Next steps:")
+    print(f"  1. Generate a new secret at your provider")
+    print(f"  2. Update {primary} in Settings > Advanced with the new value")
+    print(f"  3. Update the secret at your provider")
+    print(f"  4. After confirming webhooks work: dispatcher-cli webhook rotate-cleanup {args.source}")
+
+
+def cmd_webhook_rotate_cleanup(args, config):
+    db = get_db(config)
+    row = db.execute("SELECT * FROM webhooks WHERE source = ?", (args.source,)).fetchone()
+    if not row:
+        print(f"Error: Source '{args.source}' not found.", file=sys.stderr)
+        sys.exit(1)
+
+    cols = [d[0] for d in db.execute("SELECT * FROM webhooks LIMIT 0").description]
+    current = dict(zip(cols, row))
+    secret_env = current.get("secret_env", "")
+
+    if "," not in secret_env:
+        print(f"No rotation in progress for '{args.source}' (secret_env={secret_env}).")
+        return
+
+    parts = [s.strip() for s in secret_env.split(",")]
+    primary = parts[0]
+    old_names = parts[1:]
+
+    now = datetime.now(timezone.utc).isoformat()
+    db.execute("UPDATE webhooks SET secret_env = ?, updated_at = ? WHERE source = ?",
+               (primary, now, args.source))
+    db.commit()
+
+    for old_name in old_names:
+        _remove_secret(old_name)
+
+    print(f"Rotation cleanup complete for '{args.source}':")
+    print(f"  secret_env: {secret_env} → {primary}")
+    for old_name in old_names:
+        print(f"  Removed {old_name} from secrets")
+
+
+
 # --- Channel commands ---
 
 def cmd_channel_list(args, config):
@@ -627,6 +734,12 @@ def main():
 
     wh_sub.add_parser("providers", help="List available provider blueprints from providers.yaml")
 
+    wh_rotate = wh_sub.add_parser("rotate", help="Start zero-downtime secret rotation")
+    wh_rotate.add_argument("source")
+
+    wh_rotate_cleanup = wh_sub.add_parser("rotate-cleanup", help="Finish secret rotation and remove old secret")
+    wh_rotate_cleanup.add_argument("source")
+
     # channel
     ch = sub.add_parser("channel")
     ch_sub = ch.add_subparsers(dest="action")
@@ -662,6 +775,8 @@ def main():
         ("webhook", "enable"): cmd_webhook_enable,
         ("webhook", "stats"): cmd_webhook_stats,
         ("webhook", "providers"): cmd_webhook_providers,
+        ("webhook", "rotate"): cmd_webhook_rotate,
+        ("webhook", "rotate-cleanup"): cmd_webhook_rotate_cleanup,
         ("channel", "list"): cmd_channel_list,
         ("channel", "show"): cmd_channel_show,
         ("agent", "list"): cmd_agent_list,

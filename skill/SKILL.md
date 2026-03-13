@@ -267,3 +267,16 @@ dispatcher-cli agent run webhooks/readwise-daily
 | `dedupe_hours`                | `24`                      | How long to remember webhook event IDs                                                |
 | `system_notification_channel` | `sms`                     | Channel for system-level alerts                                                       |
 | `channels`                    | `{}`                      | Custom channel configurations                                                         |
+
+---
+
+## Secret Rotation
+
+Zero-downtime webhook secret rotation via CLI. The `secret_env` field supports comma-separated env var names — verification tries each until one matches.
+
+```bash
+dispatcher-cli webhook rotate <source>       # Start: copies secret to _OLD, accepts both
+dispatcher-cli webhook rotate-cleanup <source> # Finish: reverts to primary, removes _OLD
+```
+
+Between `rotate` and `rotate-cleanup`, update the primary env var in Settings > Advanced with the new secret value, then update the secret at the provider. See `references/cli.md` for the full workflow.

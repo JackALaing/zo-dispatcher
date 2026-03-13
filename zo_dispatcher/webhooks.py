@@ -72,10 +72,6 @@ def verify_signature(source_config: dict, header_value: str | None, body: bytes,
         if not header_value:
             logger.warning(f"Missing signature header for source '{source_config['source']}'")
             return False
-        secret = os.environ.get(secret_env, "")
-        if not secret:
-            logger.error(f"Secret env var '{secret_env}' not set")
-            return False
 
         prefix = source_config.get("signature_prefix", "")
         if prefix and header_value.startswith(prefix):
@@ -92,16 +88,24 @@ def verify_signature(source_config: dict, header_value: str | None, body: bytes,
             logger.error(f"Unknown hash function '{hash_name}' in algo '{algo}'")
             return False
 
-        computed = hmac_mod.new(secret.encode(), body, hash_func)
-        if fmt == "hex":
-            expected = computed.hexdigest()
-        elif fmt == "base64":
-            expected = base64.b64encode(computed.digest()).decode()
-        else:
-            logger.error(f"Unknown format '{fmt}' in algo '{algo}'")
-            return False
+        secret_names = [s.strip() for s in secret_env.split(",") if s.strip()]
+        for name in secret_names:
+            secret = os.environ.get(name, "")
+            if not secret:
+                continue
+            computed = hmac_mod.new(secret.encode(), body, hash_func)
+            if fmt == "hex":
+                expected = computed.hexdigest()
+            elif fmt == "base64":
+                expected = base64.b64encode(computed.digest()).decode()
+            else:
+                logger.error(f"Unknown format '{fmt}' in algo '{algo}'")
+                return False
+            if hmac_mod.compare_digest(expected, header_value):
+                return True
 
-        return hmac_mod.compare_digest(expected, header_value)
+        logger.warning(f"Signature mismatch for source '{source_config['source']}' (tried {len(secret_names)} secret(s))")
+        return False
 
     if source_config.get("allow_unsigned"):
         logger.info(f"Accepting unsigned webhook from source '{source_config['source']}' (allow_unsigned=true)")

@@ -29,7 +29,29 @@ dispatcher-cli webhook disable <source>
 dispatcher-cli webhook enable <source>
 dispatcher-cli webhook stats <source> [--window DURATION] [--alert-threshold N]
 dispatcher-cli webhook providers
+
+# Secret rotation (zero-downtime)
+dispatcher-cli webhook rotate <source>
+dispatcher-cli webhook rotate-cleanup <source>
 ```
+
+### Secret Rotation
+
+Zero-downtime webhook secret rotation. The `secret_env` field supports comma-separated env var names — verification tries each in order until one matches.
+
+```bash
+# 1. Start rotation: copies current secret to _OLD, updates source to accept both
+dispatcher-cli webhook rotate github
+
+# 2. Generate new secret at provider, update the primary env var in Settings > Advanced,
+#    then update the secret at the provider
+
+# 3. After confirming webhooks work with the new secret:
+dispatcher-cli webhook rotate-cleanup github
+```
+
+`rotate` will refuse to run if a rotation is already in progress (comma in `secret_env`).
+`rotate-cleanup` reverts `secret_env` to the primary name and removes `_OLD` from secrets.
 
 ### Blueprint Auto-Fill
 
