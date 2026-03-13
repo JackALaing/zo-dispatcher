@@ -731,12 +731,28 @@ class Dispatcher:
         logger.info(f"Webhook server listening on port {port}")
         return runner
 
+    def _audit_webhook_secrets(self) -> list[str]:
+        """Check all registered webhook sources for missing secret env vars."""
+        warnings = []
+        for src in self.db.list_webhook_sources():
+            secret_env = src.get("secret_env")
+            if secret_env and not os.environ.get(secret_env):
+                warnings.append(
+                    f"Source '{src['source']}': secret env var '{secret_env}' "
+                    f"not set in current process environment"
+                )
+        for w in warnings:
+            logger.warning(f"Webhook secret audit: {w}")
+        return warnings
+
     async def handle_reload(self, request):
         self._refresh_agents()
         self._maybe_reload_config()
+        secret_warnings = self._audit_webhook_secrets()
         return web.json_response({
             "reloaded": True,
             "agents_loaded": len(self._agents),
+            "secret_warnings": secret_warnings,
         })
 
     async def handle_health(self, request):
@@ -905,6 +921,8 @@ class Dispatcher:
             started_msg += ", parse errors present"
         started_msg += ")"
         logger.info(started_msg)
+
+        self._audit_webhook_secrets()
 
         loop = asyncio.get_event_loop()
         loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(self.shutdown()))

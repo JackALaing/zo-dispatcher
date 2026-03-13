@@ -29,6 +29,8 @@ dispatcher-cli webhook add <source> \
 
 Direct the user to [Settings > Advanced](/?t=settings&s=advanced) to add the webhook secret as an environment variable (the name must match `--secret-env`).
 
+**Missing secret detection:** `webhook add` checks the current environment for the `secret_env` variable and prints a warning if it's missing. The same audit runs on server startup and on `/reload`, surfacing warnings in the service log and in the reload JSON response (`secret_warnings` array).
+
 ### Step 3: Create the Agent File
 
 Create a markdown file in the agents directory. Choose the pattern (Trigger, Sentinel, or Inbox) based on the [decision tree](../SKILL.md#choosing-a-pattern) in SKILL.md. Set the frontmatter fields accordingly and write the prompt body.

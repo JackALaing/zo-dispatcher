@@ -186,6 +186,10 @@ def cmd_webhook_add(args, config):
         print(f"  Signature: {algo}")
     if secret_env:
         print(f"  Secret env: {secret_env}")
+        if not os.environ.get(secret_env):
+            print(f"  WARNING: '{secret_env}' is not set in the current environment. "
+                  f"Webhook signature verification will fail until this secret is added "
+                  f"and the dispatcher service is restarted.", file=sys.stderr)
     if signature_header:
         print(f"  Header: {signature_header}")
     if event_type_path:

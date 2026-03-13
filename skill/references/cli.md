@@ -65,7 +65,7 @@ Use `dispatcher-cli webhook providers` to list all available blueprints.
 
 | Option               | Description                                                                                           |
 | -------------------- | ----------------------------------------------------------------------------------------------------- |
-| `--secret-env`       | Environment variable holding the webhook secret. Required unless `--allow-unsigned`. Blueprint default: `<SOURCE>_WEBHOOK_SECRET`. |
+| `--secret-env`       | Environment variable holding the webhook secret. Required unless `--allow-unsigned`. Blueprint default: `<SOURCE>_WEBHOOK_SECRET`. Prints a warning if the env var is not set at add time. |
 | `--signature-header` | HTTP header containing the signature (e.g., `x-hub-signature-256`).                                   |
 | `--signature-algo`   | Verification algorithm: `hmac-sha256-hex` (default), `hmac-sha256-base64`, `hmac-sha1-hex`, `custom`. |
 | `--signature-prefix` | Prefix to strip from signature header value before comparison (e.g., `sha256=`).                      |
@@ -76,7 +76,7 @@ Use `dispatcher-cli webhook providers` to list all available blueprints.
 
 ### Testing
 
-`webhook test` calls `/reload` first, so new agent files are picked up immediately:
+`webhook test` calls `/reload` first, so new agent files are picked up immediately. The reload response includes a `secret_warnings` array listing any registered sources whose `secret_env` is missing from the process environment.
 
 ```bash
 dispatcher-cli webhook test github --payload '{"action": "opened", "issue": {"number": 42, "title": "Bug report", "body": "Something broke"}, "repository": {"full_name": "user/repo"}}'
