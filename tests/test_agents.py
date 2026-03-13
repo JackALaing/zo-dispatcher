@@ -650,7 +650,7 @@ class TestDeferredQueueOperations:
 
     def test_append_deferred_event(self, tmp_path):
         d = self._make_dispatcher(tmp_path)
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             d._append_deferred_event("heartbeats/triage", "todoist.item.added", {"task": "Buy milk"})
         )
 
@@ -665,9 +665,8 @@ class TestDeferredQueueOperations:
 
     def test_append_multiple_events(self, tmp_path):
         d = self._make_dispatcher(tmp_path)
-        loop = asyncio.get_event_loop()
         for i in range(3):
-            loop.run_until_complete(
+            asyncio.run(
                 d._append_deferred_event("heartbeats/triage", f"event.{i}", {"i": i})
             )
 
@@ -678,10 +677,8 @@ class TestDeferredQueueOperations:
     def test_count_deferred_events(self, tmp_path):
         d = self._make_dispatcher(tmp_path)
         assert d._count_deferred_events("heartbeats/triage") == 0
-
-        loop = asyncio.get_event_loop()
         for i in range(5):
-            loop.run_until_complete(
+            asyncio.run(
                 d._append_deferred_event("heartbeats/triage", f"event.{i}", {"i": i})
             )
 
@@ -689,12 +686,11 @@ class TestDeferredQueueOperations:
 
     def test_snapshot_queue(self, tmp_path):
         d = self._make_dispatcher(tmp_path)
-        loop = asyncio.get_event_loop()
 
-        loop.run_until_complete(
+        asyncio.run(
             d._append_deferred_event("heartbeats/triage", "event.1", {"a": 1})
         )
-        loop.run_until_complete(
+        asyncio.run(
             d._append_deferred_event("heartbeats/triage", "event.2", {"a": 2})
         )
 
@@ -715,16 +711,15 @@ class TestDeferredQueueOperations:
 
     def test_new_events_go_to_fresh_queue_after_snapshot(self, tmp_path):
         d = self._make_dispatcher(tmp_path)
-        loop = asyncio.get_event_loop()
 
-        loop.run_until_complete(
+        asyncio.run(
             d._append_deferred_event("heartbeats/triage", "event.1", {"a": 1})
         )
 
         snapshot = d._snapshot_queue("heartbeats/triage")
         assert snapshot is not None
 
-        loop.run_until_complete(
+        asyncio.run(
             d._append_deferred_event("heartbeats/triage", "event.2", {"a": 2})
         )
 
@@ -738,9 +733,8 @@ class TestDeferredQueueOperations:
 
     def test_cleanup_snapshot_on_success(self, tmp_path):
         d = self._make_dispatcher(tmp_path)
-        loop = asyncio.get_event_loop()
 
-        loop.run_until_complete(
+        asyncio.run(
             d._append_deferred_event("heartbeats/triage", "event.1", {"a": 1})
         )
         snapshot = d._snapshot_queue("heartbeats/triage")
@@ -751,9 +745,8 @@ class TestDeferredQueueOperations:
 
     def test_cleanup_snapshot_preserved_on_failure(self, tmp_path):
         d = self._make_dispatcher(tmp_path)
-        loop = asyncio.get_event_loop()
 
-        loop.run_until_complete(
+        asyncio.run(
             d._append_deferred_event("heartbeats/triage", "event.1", {"a": 1})
         )
         snapshot = d._snapshot_queue("heartbeats/triage")
@@ -764,15 +757,14 @@ class TestDeferredQueueOperations:
 
     def test_leftover_snapshots_merged(self, tmp_path):
         d = self._make_dispatcher(tmp_path)
-        loop = asyncio.get_event_loop()
 
-        loop.run_until_complete(
+        asyncio.run(
             d._append_deferred_event("heartbeats/triage", "event.old", {"old": True})
         )
         old_snapshot = d._snapshot_queue("heartbeats/triage")
         d._cleanup_snapshot(old_snapshot, success=False)
 
-        loop.run_until_complete(
+        asyncio.run(
             d._append_deferred_event("heartbeats/triage", "event.new", {"new": True})
         )
 
@@ -839,10 +831,8 @@ class TestDeferredTemplateVariable:
             "max_runs": 5,
             "max_runs_window": 3600,
         }
-
-        loop = asyncio.get_event_loop()
         for i in range(10):
-            loop.run_until_complete(
+            asyncio.run(
                 d._append_deferred_event(agent["id"], f"event.{i}", {"i": i})
             )
 
