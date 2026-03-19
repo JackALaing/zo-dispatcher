@@ -20,7 +20,7 @@ Key paths (relative to the zo-dispatcher install directory):
 - Transforms: configured via `transforms_dir`
 - CLI: `dispatcher-cli` (available on PATH after `pip install .`)
 
-The dispatcher reads agent files, fires `/zo/ask` calls on schedule or webhook triggers, and routes output to notification channels.
+The dispatcher reads agent files, dispatches to the Zo API or a local Hermes Agent on schedule or webhook triggers, and routes output to notification channels.
 
 **Reference docs** (load only when needed):
 
@@ -133,7 +133,19 @@ Agent IDs are path-based: `schedules/daily-summary`, `webhooks/github-issue`.
 | `max_runs`        | all                | no       | unlimited      | Total dispatches before auto-disable. Count resets when the agent is re-enabled.   |
 | `expires_at`      | all                | no       | —              | ISO 8601 datetime. Agent auto-disables when this time is reached. Naive datetimes treated as UTC. |
 | `defer_to_cron`   | `both` only        | no       | `false`        | `false`, `skip_if_empty`, or `always_run`. Requires `trigger: both`.              |
+| `backend`         | all                | no       | `zo`           | `zo` (Zo API) or `hermes` (local Hermes Agent at localhost:8788)                  |
 | `active`          | all                | no       | `true`         | Set false to disable                                                              |
+
+**Hermes-only fields** (ignored when `backend: zo`):
+
+| Field             | Required | Default  | Description                                                                       |
+| ----------------- | -------- | -------- | --------------------------------------------------------------------------------- |
+| `reasoning`       | no       | —        | Reasoning effort: `off`, `low`, `medium`, `high`                                  |
+| `max_iterations`  | no       | —        | Max tool-use iterations per turn                                                  |
+| `skip_memory`     | no       | `false`  | Skip loading Hermes persistent memory                                             |
+| `skip_context`    | no       | `false`  | Skip loading context files (AGENTS.md, .hermes.md, etc.)                          |
+| `tools`           | no       | —        | Enabled toolset whitelist (e.g., `[web, file, terminal]`). Mutually exclusive with `tools_deny`. |
+| `tools_deny`      | no       | —        | Disabled toolset blacklist (e.g., `[browser, rl]`). Mutually exclusive with `tools`. |
 
 ### Template Variables
 

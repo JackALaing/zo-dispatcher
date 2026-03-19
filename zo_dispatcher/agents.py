@@ -118,6 +118,10 @@ def parse_agent_file(filepath: Path, agents_dir: Path) -> tuple[dict | None, str
             logger.warning(f"Invalid expires_at in {filepath}: {e}")
             return None, f"Invalid expires_at: {e}"
 
+    if frontmatter.get("tools") and frontmatter.get("tools_deny"):
+        logger.warning(f"Both tools and tools_deny specified in {filepath}")
+        return None, "tools and tools_deny are mutually exclusive (use one or the other)"
+
     warnings = []
     if defer_to_cron and "{{ queue_file }}" not in body:
         msg = f"defer_to_cron: {defer_to_cron} but prompt does not contain {{{{ queue_file }}}}"
@@ -141,6 +145,13 @@ def parse_agent_file(filepath: Path, agents_dir: Path) -> tuple[dict | None, str
         "max_runs": frontmatter.get("max_runs"),
         "expires_at": expires_at,
         "defer_to_cron": defer_to_cron,
+        "backend": frontmatter.get("backend"),
+        "reasoning": frontmatter.get("reasoning"),
+        "max_iterations": frontmatter.get("max_iterations"),
+        "skip_memory": frontmatter.get("skip_memory"),
+        "skip_context": frontmatter.get("skip_context"),
+        "tools": frontmatter.get("tools"),
+        "tools_deny": frontmatter.get("tools_deny"),
         "prompt": body,
         "_path": str(filepath),
         "_warnings": warnings,

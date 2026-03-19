@@ -543,6 +543,57 @@ class Dispatcher:
         logger.error(f"All retries exhausted for conv {conv_id}")
         return "", conv_id
 
+    HERMES_URL = "http://127.0.0.1:8788"
+
+    async def call_hermes(self, prompt: str, model: str | None = None,
+                          timeout_seconds: int | None = None,
+                          reasoning_effort: str | None = None,
+                          max_iterations: int | None = None,
+                          skip_memory: bool | None = None,
+                          skip_context: bool | None = None,
+                          enabled_toolsets: list[str] | None = None,
+                          disabled_toolsets: list[str] | None = None) -> tuple[str, str]:
+        """Call hermes-api (non-streaming) — same contract as call_zo_ask."""
+        payload = {
+            "input": prompt,
+            "stream": False,
+        }
+        if model:
+            payload["model_name"] = model
+        if reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
+        if max_iterations is not None:
+            payload["max_iterations"] = max_iterations
+        if skip_memory:
+            payload["skip_memory"] = skip_memory
+        if skip_context:
+            payload["skip_context"] = skip_context
+        if enabled_toolsets:
+            payload["enabled_toolsets"] = enabled_toolsets
+        if disabled_toolsets:
+            payload["disabled_toolsets"] = disabled_toolsets
+
+        timeout = aiohttp.ClientTimeout(
+            total=timeout_seconds or self.config.get("zo_ask_timeout_seconds", 1800)
+        )
+        headers = {"Content-Type": "application/json"}
+
+        async with self.http_session.post(
+            f"{self.HERMES_URL}/ask",
+            headers=headers,
+            json=payload,
+            timeout=timeout,
+        ) as resp:
+            if resp.status != 200:
+                error_text = await resp.text()
+                raise Exception(f"Hermes API error {resp.status}: {error_text}")
+
+            data = await resp.json()
+            output = data.get("output", "")
+            conv_id = data.get("conversation_id", "")
+
+        return output, conv_id
+
     async def _post_to_channel(self, channel_config: dict, title: str, content: str,
                                discord_channel: str | None = None, conv_id: str = ""):
         payload = {
@@ -633,14 +684,30 @@ class Dispatcher:
         start_time = time.monotonic()
         logger.info(f"Dispatching agent '{agent_id}' ({title})")
 
+        backend = agent.get("backend", "zo")
         try:
-            output, conv_id = await self.call_zo_ask(
-                prompt,
-                model=agent.get("model"),
-                persona_id=agent.get("persona"),
-                timeout_seconds=agent.get("timeout"),
-                retry_delays=agent.get("retry_delays"),
-            )
+            if backend == "hermes":
+                tools = agent.get("tools")
+                tools_deny = agent.get("tools_deny")
+                output, conv_id = await self.call_hermes(
+                    prompt,
+                    model=agent.get("model"),
+                    timeout_seconds=agent.get("timeout"),
+                    reasoning_effort=agent.get("reasoning"),
+                    max_iterations=agent.get("max_iterations"),
+                    skip_memory=agent.get("skip_memory"),
+                    skip_context=agent.get("skip_context"),
+                    enabled_toolsets=tools if isinstance(tools, list) else None,
+                    disabled_toolsets=tools_deny if isinstance(tools_deny, list) else None,
+                )
+            else:
+                output, conv_id = await self.call_zo_ask(
+                    prompt,
+                    model=agent.get("model"),
+                    persona_id=agent.get("persona"),
+                    timeout_seconds=agent.get("timeout"),
+                    retry_delays=agent.get("retry_delays"),
+                )
         except Exception as e:
             duration = time.monotonic() - start_time
             logger.error(f"Agent '{agent_id}' failed: {e}")

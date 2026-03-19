@@ -19,6 +19,10 @@ A general-purpose agent dispatcher for [Zo Computer](https://zo.computer) — fr
 - Per-agent notification levels: `always`, `errors`, or `never`
 - Business hours queueing — notifications held until your configured window
 
+**Multi-Backend**
+- Dispatch to the Zo API (`backend: zo`, default) or a local [Hermes Agent](https://github.com/NousResearch/hermes-agent) instance (`backend: hermes`)
+- Hermes agents support per-agent reasoning effort, iteration limits, memory/context toggles, and toolset restrictions
+
 **Reliability & Cost Control**
 - Built-in Zo API resilience: per-agent `timeout` and `retry_delays`, automatic retry on empty/failed responses, session pool recovery
 - Webhook deduplication via event ID tracking
@@ -148,7 +152,9 @@ zo-dispatcher (aiohttp server + poll loop)
         │
         ├─ Template injection ({{ payload }}, {{ event_type }})
         │
-        ├─ call_zo_ask() ← Zo API with retry + session pool recovery
+        ├─ Backend dispatch (per-agent `backend` field)
+        │   ├─ call_zo_ask()    ← Zo API with retry + session pool recovery (default)
+        │   └─ call_hermes()    ← Local Hermes Agent API (localhost:8788)
         │
         └─ Notification routing
                 │
