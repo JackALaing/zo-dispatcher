@@ -235,6 +235,45 @@ Deeply nested.
         assert error is None
         assert agent["id"] == "deep/nested/agent"
 
+    def test_hermes_frontmatter_fields(self, agents_dir):
+        f = write_agent(agents_dir, "schedules/hermes.md", """\
+---
+trigger: schedule
+rrule: "RRULE:FREQ=DAILY;BYHOUR=0"
+backend: hermes
+reasoning: high
+max_iterations: 12
+skip_memory: true
+skip_context: true
+tools: [web, file]
+---
+
+Hermes agent body.
+""")
+        agent, error = parse_agent_file(f, agents_dir)
+        assert error is None
+        assert agent["backend"] == "hermes"
+        assert agent["reasoning"] == "high"
+        assert agent["max_iterations"] == 12
+        assert agent["skip_memory"] is True
+        assert agent["skip_context"] is True
+        assert agent["tools"] == ["web", "file"]
+
+    def test_tools_and_tools_deny_are_mutually_exclusive(self, agents_dir):
+        f = write_agent(agents_dir, "schedules/bad-tools.md", """\
+---
+trigger: schedule
+rrule: "RRULE:FREQ=DAILY;BYHOUR=0"
+tools: [web]
+tools_deny: [rl]
+---
+
+Conflicting tool config.
+""")
+        agent, error = parse_agent_file(f, agents_dir)
+        assert agent is None
+        assert "mutually exclusive" in error
+
 
 # --- Schedule computation tests ---
 # dtstart is deliberately naive — tz-awareness comes from the rrule itself if needed.

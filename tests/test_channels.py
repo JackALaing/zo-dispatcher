@@ -127,6 +127,76 @@ class TestCustomChannelDelivery:
         asyncio.run(run())
         os.unlink(tmpdb)
 
+    def test_call_hermes_includes_hermes_fields(self):
+        d, tmpdb = make_dispatcher()
+        captured = {}
+
+        class HermesResp(FakeResp):
+            async def json(self):
+                return {"output": "done", "conversation_id": "conv-1"}
+
+        class HermesSession:
+            def post(self, url, json=None, timeout=None, headers=None):
+                captured["url"] = url
+                captured["json"] = json
+                captured["headers"] = headers
+                return HermesResp()
+
+        async def run():
+            d.http_session = HermesSession()
+            output, conv_id = await d.call_hermes(
+                "Prompt",
+                model="byok:test",
+                timeout_seconds=30,
+                reasoning_effort="high",
+                max_iterations=9,
+                skip_memory=True,
+                skip_context=True,
+                enabled_toolsets=["web", "file"],
+                disabled_toolsets=["rl"],
+            )
+            assert output == "done"
+            assert conv_id == "conv-1"
+
+        asyncio.run(run())
+        payload = captured["json"]
+        assert captured["url"] == "http://127.0.0.1:8788/ask"
+        assert payload["model_name"] == "byok:test"
+        assert payload["reasoning_effort"] == "high"
+        assert payload["max_iterations"] == 9
+        assert payload["skip_memory"] is True
+        assert payload["skip_context"] is True
+        assert payload["enabled_toolsets"] == ["web", "file"]
+        assert payload["disabled_toolsets"] == ["rl"]
+        os.unlink(tmpdb)
+
+    def test_dispatch_agent_passes_hermes_frontmatter(self):
+        d, tmpdb = make_dispatcher()
+        agent = make_agent(
+            backend="hermes",
+            reasoning="medium",
+            max_iterations=5,
+            skip_memory=True,
+            skip_context=True,
+            tools=["web", "terminal"],
+            tools_deny=None,
+        )
+
+        async def run():
+            with patch.object(d, "call_hermes", AsyncMock(return_value=("done", "conv-1"))) as call_hermes:
+                d.db.mark_run = MagicMock()
+                await d.dispatch_agent(agent)
+                kwargs = call_hermes.await_args.kwargs
+                assert kwargs["reasoning_effort"] == "medium"
+                assert kwargs["max_iterations"] == 5
+                assert kwargs["skip_memory"] is True
+                assert kwargs["skip_context"] is True
+                assert kwargs["enabled_toolsets"] == ["web", "terminal"]
+                assert kwargs["disabled_toolsets"] is None
+
+        asyncio.run(run())
+        os.unlink(tmpdb)
+
     def test_deliver_routes_to_post(self):
         d, tmpdb = make_dispatcher()
         session = FakeSession()
