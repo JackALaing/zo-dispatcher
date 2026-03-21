@@ -170,6 +170,37 @@ class TestCustomChannelDelivery:
         assert payload["disabled_toolsets"] == ["rl"]
         os.unlink(tmpdb)
 
+    def test_call_hermes_omits_falsey_optional_fields(self):
+        d, tmpdb = make_dispatcher()
+        captured = {}
+
+        class HermesResp(FakeResp):
+            async def json(self):
+                return {"output": "done", "conversation_id": "conv-1"}
+
+        class HermesSession:
+            def post(self, url, json=None, timeout=None, headers=None):
+                captured["json"] = json
+                return HermesResp()
+
+        async def run():
+            d.http_session = HermesSession()
+            await d.call_hermes(
+                "Prompt",
+                skip_memory=False,
+                skip_context=False,
+                enabled_toolsets=[],
+                disabled_toolsets=[],
+            )
+
+        asyncio.run(run())
+        payload = captured["json"]
+        assert "skip_memory" not in payload
+        assert "skip_context" not in payload
+        assert "enabled_toolsets" not in payload
+        assert "disabled_toolsets" not in payload
+        os.unlink(tmpdb)
+
     def test_dispatch_agent_passes_hermes_frontmatter(self):
         d, tmpdb = make_dispatcher()
         agent = make_agent(
@@ -193,6 +224,29 @@ class TestCustomChannelDelivery:
                 assert kwargs["skip_context"] is True
                 assert kwargs["enabled_toolsets"] == ["web", "terminal"]
                 assert kwargs["disabled_toolsets"] is None
+
+        asyncio.run(run())
+        os.unlink(tmpdb)
+
+    def test_dispatch_agent_passes_tools_deny_and_omits_invalid_tool_fields(self):
+        d, tmpdb = make_dispatcher()
+        agent = make_agent(
+            backend="hermes",
+            tools="web",
+            tools_deny=["browser"],
+            skip_memory=False,
+            skip_context=False,
+        )
+
+        async def run():
+            with patch.object(d, "call_hermes", AsyncMock(return_value=("done", "conv-1"))) as call_hermes:
+                d.db.mark_run = MagicMock()
+                await d.dispatch_agent(agent)
+                kwargs = call_hermes.await_args.kwargs
+                assert kwargs["enabled_toolsets"] is None
+                assert kwargs["disabled_toolsets"] == ["browser"]
+                assert kwargs["skip_memory"] is False
+                assert kwargs["skip_context"] is False
 
         asyncio.run(run())
         os.unlink(tmpdb)
