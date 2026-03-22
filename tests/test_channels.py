@@ -94,6 +94,23 @@ class FakeSession:
         return FakeResp()
 
 
+def make_hermes_session(captured: dict, body: dict | None = None):
+    response_body = body or {"output": "done", "conversation_id": "conv-1"}
+
+    class HermesResp(FakeResp):
+        async def json(self):
+            return response_body
+
+    class HermesSession:
+        def post(self, url, json=None, timeout=None, headers=None):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return HermesResp()
+
+    return HermesSession()
+
+
 # --- Custom channel (Discord) tests ---
 
 class TestCustomChannelDelivery:
@@ -131,19 +148,8 @@ class TestCustomChannelDelivery:
         d, tmpdb = make_dispatcher()
         captured = {}
 
-        class HermesResp(FakeResp):
-            async def json(self):
-                return {"output": "done", "conversation_id": "conv-1"}
-
-        class HermesSession:
-            def post(self, url, json=None, timeout=None, headers=None):
-                captured["url"] = url
-                captured["json"] = json
-                captured["headers"] = headers
-                return HermesResp()
-
         async def run():
-            d.http_session = HermesSession()
+            d.http_session = make_hermes_session(captured)
             output, conv_id = await d.call_hermes(
                 "Prompt",
                 model="byok:test",
@@ -174,17 +180,8 @@ class TestCustomChannelDelivery:
         d, tmpdb = make_dispatcher()
         captured = {}
 
-        class HermesResp(FakeResp):
-            async def json(self):
-                return {"output": "done", "conversation_id": "conv-1"}
-
-        class HermesSession:
-            def post(self, url, json=None, timeout=None, headers=None):
-                captured["json"] = json
-                return HermesResp()
-
         async def run():
-            d.http_session = HermesSession()
+            d.http_session = make_hermes_session(captured)
             await d.call_hermes(
                 "Prompt",
                 skip_memory=False,
