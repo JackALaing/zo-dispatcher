@@ -69,6 +69,12 @@ class Dispatcher:
         if not self.api_key:
             raise ValueError("DISPATCHER_ZO_API_KEY not set")
         self.running = True
+        self.default_backend = config.get("default_backend", "zo")
+        if self.default_backend not in ("zo", "hermes"):
+            logger.warning(
+                f"Invalid default_backend {self.default_backend!r}; falling back to 'zo'"
+            )
+            self.default_backend = "zo"
         hours_cfg = config.get("notification_hours", {"start": 9, "end": 21})
         self.notify_hour_start = hours_cfg["start"]
         self.notify_hour_end = hours_cfg["end"]
@@ -118,6 +124,12 @@ class Dispatcher:
             mtime = CONFIG_PATH.stat().st_mtime
             if mtime > self._config_mtime:
                 self.config = load_config()
+                self.default_backend = self.config.get("default_backend", "zo")
+                if self.default_backend not in ("zo", "hermes"):
+                    logger.warning(
+                        f"Invalid default_backend {self.default_backend!r}; falling back to 'zo'"
+                    )
+                    self.default_backend = "zo"
                 self._config_mtime = mtime
                 logger.info("Config reloaded")
         except Exception as e:
@@ -684,7 +696,7 @@ class Dispatcher:
         start_time = time.monotonic()
         logger.info(f"Dispatching agent '{agent_id}' ({title})")
 
-        backend = agent.get("backend", "zo")
+        backend = agent.get("backend") or self.default_backend
         try:
             if backend == "hermes":
                 tools = agent.get("tools")

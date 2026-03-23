@@ -22,6 +22,25 @@ Key paths (relative to the zo-dispatcher install directory):
 
 The dispatcher reads agent files, dispatches to the Zo API or a local Hermes Agent on schedule or webhook triggers, and routes output to notification channels.
 
+## Hermes Backend
+
+`zo-dispatcher` can run an individual agent through `zo-hermes` by setting `backend: hermes` in the agent frontmatter.
+
+If the user wants Hermes as the default for agents that omit `backend`, set `default_backend: "hermes"` in `config/config.json`. The example config keeps `default_backend: "zo"`.
+
+That unlocks:
+
+- local Hermes execution for that agent
+- `reasoning`, `max_iterations`, `skip_memory`, `skip_context`, `tools`, and `tools_deny`
+- pairing Hermes-backed agents with Discord delivery through `notify_channel: discord/<channel-name>` when `zo-discord` is installed
+
+Scope boundaries:
+
+- This applies only to `zo-dispatcher` agents with `backend: hermes`.
+- It does not affect native Zo agents.
+- It does not make webhook sources talk to Hermes outside `zo-dispatcher`.
+- If the user wants another source to hit Hermes directly, that source must call `zo-hermes` itself or use Hermes' own messaging gateways.
+
 **Reference docs** (load only when needed):
 
 - `references/scheduled-agents.md` — MANDATORY before creating any Cron agent
@@ -133,7 +152,7 @@ Agent IDs are path-based: `schedules/daily-summary`, `webhooks/github-issue`.
 | `max_runs`        | all                | no       | unlimited      | Total dispatches before auto-disable. Count resets when the agent is re-enabled.   |
 | `expires_at`      | all                | no       | —              | ISO 8601 datetime. Agent auto-disables when this time is reached. Naive datetimes treated as UTC. |
 | `defer_to_cron`   | `both` only        | no       | `false`        | `false`, `skip_if_empty`, or `always_run`. Requires `trigger: both`.              |
-| `backend`         | all                | no       | `zo`           | `zo` (Zo API) or `hermes` (local Hermes Agent at localhost:8788)                  |
+| `backend`         | all                | no       | config default | `zo` (Zo API) or `hermes` (local Hermes Agent at localhost:8788)                  |
 | `active`          | all                | no       | `true`         | Set false to disable                                                              |
 
 **Hermes-only fields** (ignored when `backend: zo`):
@@ -275,6 +294,7 @@ dispatcher-cli agent run webhooks/readwise-daily
 | `agents_dir`                  | `./agents`                | Path to agent markdown files                                                          |
 | `db_path`                     | `./data/dispatcher.db`    | Path to SQLite database                                                               |
 | `zo_api_url`                  | `https://api.zo.computer` | Zo API endpoint                                                                       |
+| `default_backend`            | `zo`                      | Default backend for agents that omit `backend`. Set to `hermes` to route those agents through `zo-hermes` by default. |
 | `default_model`               | —                         | Default model ID for agents without `model` (user must set)                           |
 | `poll_interval_seconds`       | `60`                      | How often to check for due scheduled agents                                           |
 | `transforms_dir`              | `./transforms`            | Path to transform scripts directory                                                   |

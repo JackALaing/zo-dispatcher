@@ -19,6 +19,7 @@ CONFIG = {
     "agents_dir": "/tmp/test-agents",
     "db_path": "",
     "zo_api_url": "https://api.zo.computer",
+    "default_backend": "zo",
     "default_model": "byok:test",
     "poll_interval_seconds": 60,
     "transforms_dir": "/tmp/transforms",
@@ -221,6 +222,36 @@ class TestCustomChannelDelivery:
                 assert kwargs["skip_context"] is True
                 assert kwargs["enabled_toolsets"] == ["web", "terminal"]
                 assert kwargs["disabled_toolsets"] is None
+
+        asyncio.run(run())
+        os.unlink(tmpdb)
+
+    def test_dispatch_agent_uses_configured_default_hermes_backend(self):
+        d, tmpdb = make_dispatcher({"default_backend": "hermes"})
+        agent = make_agent(backend=None, model="byok:test")
+
+        async def run():
+            with patch.object(d, "call_hermes", AsyncMock(return_value=("done", "conv-1"))) as call_hermes:
+                with patch.object(d, "call_zo_ask", AsyncMock()) as call_zo_ask:
+                    d.db.mark_run = MagicMock()
+                    await d.dispatch_agent(agent)
+                    call_hermes.assert_awaited_once()
+                    call_zo_ask.assert_not_called()
+
+        asyncio.run(run())
+        os.unlink(tmpdb)
+
+    def test_dispatch_agent_defaults_to_zo_when_backend_omitted(self):
+        d, tmpdb = make_dispatcher({"default_backend": "zo"})
+        agent = make_agent(backend=None, model="byok:test")
+
+        async def run():
+            with patch.object(d, "call_zo_ask", AsyncMock(return_value=("done", "conv-1"))) as call_zo_ask:
+                with patch.object(d, "call_hermes", AsyncMock()) as call_hermes:
+                    d.db.mark_run = MagicMock()
+                    await d.dispatch_agent(agent)
+                    call_zo_ask.assert_awaited_once()
+                    call_hermes.assert_not_called()
 
         asyncio.run(run())
         os.unlink(tmpdb)

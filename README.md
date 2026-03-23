@@ -20,7 +20,8 @@ A general-purpose agent dispatcher for [Zo Computer](https://zo.computer) — fr
 - Business hours queueing — notifications held until your configured window
 
 **Multi-Backend**
-- Dispatch to the Zo API (`backend: zo`, default) or a local [Hermes Agent](https://github.com/NousResearch/hermes-agent) instance (`backend: hermes`)
+- Dispatch to the Zo API (`backend: zo`) or a local [Hermes Agent](https://github.com/NousResearch/hermes-agent) instance (`backend: hermes`)
+- Set `default_backend` in `config/config.json` to choose which backend agents use when they omit `backend`
 - Hermes agents support per-agent reasoning effort, iteration limits, memory/context toggles, and toolset restrictions
 
 **Reliability & Cost Control**
@@ -101,15 +102,15 @@ The `start.sh` script loads your Zo secrets and starts the dispatcher. The Zo se
 
 ### 6. Install the Skill
 
-Copy the skill to your Zo skills directory so Zo knows how to use zo-dispatcher:
+Expose the repo skill in your Zo skills directory with a symlink so the installed skill stays in sync with the service repo:
 
 ```bash
-cp -r skill/ /home/workspace/Skills/zo-dispatcher/
+ln -sfn "$(pwd)/skill" /home/workspace/Skills/zo-dispatcher
 ```
 
 ### 7. Route Zo to zo-dispatcher
 
-Create a Zo rule so your AI assistant uses zo-dispatcher instead of Zo’s built-in agents:
+Create a Zo rule so your AI assistant uses zo-dispatcher instead of Zo's built-in agents:
 
 **Condition:** User asks to create, edit, delete, schedule, or manage an agent, scheduled cron, recurring task, cron job, automated scheduled task, webhook agent, or agent trigger
 
@@ -125,6 +126,25 @@ Detailed documentation lives in the `skill/` directory:
 - **`skill/references/transforms.md`** — Payload transform scripts: reshaping, event dropping, custom signature verification
 - **`skill/references/editing-and-debugging.md`** — Editing agents, debug endpoints, logs, Loki queries, common issues
 - **`skill/references/cli.md`** — CLI command reference
+
+## Hermes Backend
+
+Set `backend: hermes` in an agent file to run that agent through the local `zo-hermes` bridge instead of Zo's `/zo/ask` endpoint.
+
+If you want Hermes to be the default for new agents, set `"default_backend": "hermes"` in `config/config.json`. `config/config.example.json` keeps the safer default of `"zo"`.
+
+What that unlocks:
+
+- local Hermes execution for that agent
+- per-agent Hermes controls: `reasoning`, `max_iterations`, `skip_memory`, `skip_context`, `tools`, `tools_deny`
+- direct pairing with `notify_channel: discord/<channel-name>` when you want Hermes-backed work to land in a `zo-discord` thread
+
+Scope boundaries:
+
+- This applies only to `zo-dispatcher` agents with `backend: hermes`.
+- It does not affect native Zo agents.
+- It does not make arbitrary webhook sources talk to Hermes unless they are routed through `zo-dispatcher` or another caller that hits `zo-hermes` directly.
+- If you want Hermes output in Discord, you still need `zo-discord` for the Discord delivery layer.
 
 ## Architecture
 
@@ -152,8 +172,8 @@ zo-dispatcher (aiohttp server + poll loop)
         │
         ├─ Template injection ({{ payload }}, {{ event_type }})
         │
-        ├─ Backend dispatch (per-agent `backend` field)
-        │   ├─ call_zo_ask()    ← Zo API with retry + session pool recovery (default)
+        ├─ Backend dispatch (per-agent `backend` field or config `default_backend`)
+        │   ├─ call_zo_ask()    ← Zo API with retry + session pool recovery
         │   └─ call_hermes()    ← Local Hermes Agent API (localhost:8788)
         │
         └─ Notification routing

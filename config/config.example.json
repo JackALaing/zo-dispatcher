@@ -2,6 +2,7 @@
   "agents_dir": "./agents",
   "db_path": "./data/dispatcher.db",
   "zo_api_url": "https://api.zo.computer",
+  "default_backend": "zo",
   "default_model": null,
   "poll_interval_seconds": 60,
   "transforms_dir": "./transforms",
