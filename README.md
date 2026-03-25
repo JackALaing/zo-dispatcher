@@ -20,7 +20,7 @@ A general-purpose agent dispatcher for [Zo Computer](https://zo.computer) — fr
 - Business hours queueing — notifications held until your configured window
 
 **Multi-Backend**
-- Dispatch to the Zo API (`backend: zo`) or a local [Hermes Agent](https://github.com/NousResearch/hermes-agent) instance (`backend: hermes`) – requires zo-hermes
+- Dispatch to the Zo API (`backend: zo`) or a local [Hermes Agent](https://github.com/NousResearch/hermes-agent) instance (`backend: hermes`) via [zo-hermes](https://github.com/JackALaing/zo-hermes)
 - Set `default_backend` in `config/config.json` to choose which backend agents use when they omit `backend`
 - Hermes agents support per-agent reasoning effort, iteration limits, memory/context toggles, and toolset restrictions
 
@@ -129,7 +129,7 @@ Detailed documentation lives in the `skill/` directory:
 
 ## Hermes Backend
 
-Set `backend: hermes` in an agent file to run that agent through the local `zo-hermes` bridge instead of Zo's `/zo/ask` endpoint.
+Set `backend: hermes` in an agent file to run that agent through the local [zo-hermes](https://github.com/JackALaing/zo-hermes) bridge instead of Zo's `/zo/ask` endpoint.
 
 If you want Hermes to be the default for new agents, set `"default_backend": "hermes"` in `config/config.json`. `config/config.example.json` keeps the safer default of `"zo"`.
 
