@@ -1,6 +1,7 @@
 """Tests for notification routing: custom channels, builtins, business hours, retry."""
 
 import asyncio
+import json
 import os
 import tempfile
 from datetime import datetime, timezone
@@ -77,6 +78,7 @@ def make_agent(**overrides):
 
 class FakeResp:
     status = 200
+    headers = {}
     async def json(self):
         return {"success": True, "thread_id": "t123"}
     async def text(self):
@@ -95,12 +97,21 @@ class FakeSession:
         return FakeResp()
 
 
-def make_hermes_session(captured: dict, body: dict | None = None):
+def make_hermes_session(captured: dict, body: dict | None = None, *, status: int = 200, text_body: str | None = None, headers: dict | None = None):
     response_body = body or {"output": "done", "conversation_id": "conv-1"}
+    response_headers = headers or {}
 
     class HermesResp(FakeResp):
         async def json(self):
             return response_body
+
+        async def text(self):
+            if text_body is not None:
+                return text_body
+            return json.dumps(response_body)
+
+    HermesResp.status = status
+    HermesResp.headers = response_headers
 
     class HermesSession:
         def post(self, url, json=None, timeout=None, headers=None):
@@ -203,6 +214,24 @@ class TestCustomChannelDelivery:
         assert "skip_context" not in payload
         assert "enabled_toolsets" not in payload
         assert "disabled_toolsets" not in payload
+        os.unlink(tmpdb)
+
+    def test_call_hermes_preserves_conversation_id_on_error(self):
+        d, tmpdb = make_dispatcher()
+        captured = {}
+
+        async def run():
+            d.http_session = make_hermes_session(
+                captured,
+                body={"error": "boom", "conversation_id": "conv-err"},
+                status=500,
+            )
+            with pytest.raises(Exception) as excinfo:
+                await d.call_hermes("Prompt")
+            assert getattr(excinfo.value, "conv_id", "") == "conv-err"
+            assert "Hermes API error 500" in str(excinfo.value)
+
+        asyncio.run(run())
         os.unlink(tmpdb)
 
     def test_dispatch_agent_passes_hermes_frontmatter(self):
@@ -588,6 +617,36 @@ class TestNotifyLevels:
             title = call.get("title", "") if isinstance(call, dict) else str(call)
             assert "[FAILED]" in title
 
+        asyncio.run(run())
+        os.unlink(tmpdb)
+
+    def test_hermes_failure_notifies_with_conversation_id_and_honcho_key(self):
+        d, tmpdb = make_dispatcher({"default_backend": "hermes"})
+        agent = make_agent(backend="hermes", notify="errors", notify_channel="discord/general")
+        notify_calls = []
+
+        async def fake_hermes_fail(*args, **kwargs):
+            raise dmodule.ApiCallError(
+                'Hermes API error 500: {"error":"boom","conversation_id":"conv-err"}',
+                conv_id="conv-err",
+            )
+
+        async def track_notify(*args, **kwargs):
+            notify_calls.append(kwargs)
+
+        async def run():
+            d.call_hermes = fake_hermes_fail
+            d._notify = track_notify
+            d.db.mark_run = MagicMock()
+            await d.dispatch_agent(agent)
+            d.db.mark_run.assert_called_once()
+            assert d.db.mark_run.call_args.kwargs["conv_id"] == "conv-err"
+            assert len(notify_calls) == 1
+            assert notify_calls[0]["conv_id"] == "conv-err"
+            assert notify_calls[0]["honcho_session_key"] == "conv-err"
+            assert "[FAILED]" in notify_calls[0]["title"]
+
+        import zo_dispatcher.server as dmodule
         asyncio.run(run())
         os.unlink(tmpdb)
 

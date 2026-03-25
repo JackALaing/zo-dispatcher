@@ -53,6 +53,27 @@ def _is_session_pool_error(error_text: str) -> bool:
     return any(marker in lower for marker in SESSION_POOL_ERROR_MARKERS)
 
 
+def _extract_conversation_id(error_text: str, headers: dict | None = None) -> str:
+    if headers:
+        header_conv_id = headers.get("X-Conversation-Id") or headers.get("x-conversation-id")
+        if header_conv_id:
+            return str(header_conv_id)
+    try:
+        data = json.loads(error_text)
+    except Exception:
+        return ""
+    if isinstance(data, dict):
+        conv_id = data.get("conversation_id") or data.get("session_id") or ""
+        return conv_id if isinstance(conv_id, str) else ""
+    return ""
+
+
+class ApiCallError(Exception):
+    def __init__(self, message: str, conv_id: str = ""):
+        super().__init__(message)
+        self.conv_id = conv_id
+
+
 def compute_jitter(agent_id: str, max_jitter: int) -> float:
     if max_jitter <= 0:
         return 0.0
@@ -504,13 +525,14 @@ class Dispatcher:
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
+                    conv_id = _extract_conversation_id(error_text, resp.headers)
                     if _is_session_pool_error(error_text) and pool_attempt < len(pool_delays) - 1:
                         logger.warning(
                             f"Session pool full ({resp.status}), retry {pool_attempt + 1}/{len(pool_delays)} in {pool_delay}s"
                         )
                         await asyncio.sleep(pool_delay)
                         continue
-                    raise Exception(f"Zo API error {resp.status}: {error_text}")
+                    raise ApiCallError(f"Zo API error {resp.status}: {error_text}", conv_id=conv_id)
 
                 data = await resp.json()
                 output = data.get("output", "")
@@ -612,7 +634,8 @@ class Dispatcher:
         ) as resp:
             if resp.status != 200:
                 error_text = await resp.text()
-                raise Exception(f"Hermes API error {resp.status}: {error_text}")
+                conv_id = _extract_conversation_id(error_text, resp.headers)
+                raise ApiCallError(f"Hermes API error {resp.status}: {error_text}", conv_id=conv_id)
 
             data = await resp.json()
             output = data.get("output", "")
@@ -722,6 +745,7 @@ class Dispatcher:
         logger.info(f"Dispatching agent '{agent_id}' ({title})")
 
         backend = agent.get("backend") or self.default_backend
+        conv_id = ""
         try:
             if backend == "hermes":
                 tools = agent.get("tools")
@@ -753,14 +777,18 @@ class Dispatcher:
                 )
         except Exception as e:
             duration = time.monotonic() - start_time
+            error_conv_id = getattr(e, "conv_id", "") or conv_id
             logger.error(f"Agent '{agent_id}' failed: {e}")
-            self.db.mark_run(agent_id, status="failure", duration=duration)
+            self.db.mark_run(agent_id, status="failure", conv_id=error_conv_id, duration=duration)
 
             if notify != "never" and notify_channel:
+                honcho_session_key = error_conv_id if backend == "hermes" and error_conv_id else ""
                 await self._notify(
                     channel_spec=notify_channel,
                     title=f"[FAILED] {title}",
                     content=f"Agent `{agent_id}` failed:\n\n```\n{e}\n```",
+                    conv_id=error_conv_id,
+                    honcho_session_key=honcho_session_key,
                 )
             return
 
