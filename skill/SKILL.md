@@ -33,6 +33,7 @@ That unlocks:
 - local Hermes execution for that agent
 - `reasoning`, `max_iterations`, `skip_memory`, `skip_context`, `tools`, and `tools_deny`
 - pairing Hermes-backed agents with Discord delivery through `notify_channel: discord/<channel-name>` when `zo-discord` is installed
+- reuse of the same agent file format, with the caveat that Zo `persona` frontmatter is currently meaningful only on the Zo backend. Hermes dispatch still accepts the field in the schema, but `zo-hermes` does not map it to a Hermes personality
 
 Scope boundaries:
 
@@ -142,7 +143,7 @@ Agent IDs are path-based: `schedules/daily-summary`, `webhooks/github-issue`.
 | `trigger`         | all                | yes      | —              | `schedule`, `webhook`, or `both`                                                  |
 | `rrule`           | `schedule`, `both` | yes      | —              | RFC 5545 recurrence rule                                                          |
 | `event`           | `webhook`, `both`  | yes      | —              | Webhook event filter: string or list of strings (dot-notation). List = match any. |
-| `persona`         | all                | no       | —              | Persona ID (`per_XXX`).                                                           |
+| `persona`         | all                | no       | —              | Persona ID (`per_XXX`). Applied on the Zo backend. Hermes dispatch still accepts the field in the schema, but `zo-hermes` currently ignores it. |
 | `model`           | all                | no       | config default | Model ID                                                                          |
 | `notify_channel`  | all                | no       | —              | `<channel>` or `<channel>/<sub_channel>`                                          |
 | `notify`          | all                | no       | `errors`       | `always`, `errors`, `never`                                                       |
@@ -157,24 +158,24 @@ Agent IDs are path-based: `schedules/daily-summary`, `webhooks/github-issue`.
 
 **Hermes-only fields** (ignored when `backend: zo`):
 
-| Field             | Required | Default  | Description                                                                       |
-| ----------------- | -------- | -------- | --------------------------------------------------------------------------------- |
-| `reasoning`       | no       | —        | Reasoning effort: `off`, `low`, `medium`, `high`                                  |
-| `max_iterations`  | no       | —        | Max tool-use iterations per turn                                                  |
-| `skip_memory`     | no       | `false`  | Skip loading Hermes persistent memory                                             |
-| `skip_context`    | no       | `false`  | Skip loading context files (AGENTS.md, .hermes.md, etc.)                          |
-| `tools`           | no       | —        | Enabled toolset whitelist (e.g., `[web, file, terminal]`). Mutually exclusive with `tools_deny`. |
-| `tools_deny`      | no       | —        | Disabled toolset blacklist (e.g., `[browser, rl]`). Mutually exclusive with `tools`. |
+| Field            | Required | Default | Description                                                                                      |
+| ---------------- | -------- | ------- | ------------------------------------------------------------------------------------------------ |
+| `reasoning`      | no       | —       | Reasoning effort: `off`, `low`, `medium`, `high`                                                 |
+| `max_iterations` | no       | —       | Max tool-use iterations per turn                                                                 |
+| `skip_memory`    | no       | `false` | Skip loading Hermes persistent memory                                                            |
+| `skip_context`   | no       | `false` | Skip loading context files (AGENTS.md, .hermes.md, etc.)                                         |
+| `tools`          | no       | —       | Enabled toolset whitelist (e.g., `[web, file, terminal]`). Mutually exclusive with `tools_deny`. |
+| `tools_deny`     | no       | —       | Disabled toolset blacklist (e.g., `[browser, rl]`). Mutually exclusive with `tools`.             |
 
 ### Template Variables
 
-| Variable | Available | Description |
-|----------|-----------|-------------|
-| `{{ payload }}` | webhook | JSON payload, pretty-printed |
-| `{{ event_type }}` | webhook | Extracted event type |
-| `{{ date }}` | all | Current date (e.g., "2026-03-04") |
-| `{{ timestamp }}` | all | Current ISO 8601 timestamp |
-| `{{ agent_id }}` | all | Namespaced ID (e.g., "schedules/daily-summary") |
+| Variable           | Available     | Description                                                                               |
+| ------------------ | ------------- | ----------------------------------------------------------------------------------------- |
+| `{{ payload }}`    | webhook       | JSON payload, pretty-printed                                                              |
+| `{{ event_type }}` | webhook       | Extracted event type                                                                      |
+| `{{ date }}`       | all           | Current date (e.g., "2026-03-04")                                                         |
+| `{{ timestamp }}`  | all           | Current ISO 8601 timestamp                                                                |
+| `{{ agent_id }}`   | all           | Namespaced ID (e.g., "schedules/daily-summary")                                           |
 | `{{ queue_file }}` | defer_to_cron | Snapshot JSONL path when events exist, or `"No events queued."` when empty (`always_run`) |
 
 ### Event Matching (Dot-Notation)
@@ -199,6 +200,8 @@ Multiple agents can listen to different events from the same source. The `event`
 - `telegram` — Telegram to the user
 - `discord/<channel-name>` — Discord, routed to the named channel in your server (e.g., `discord/general`, `discord/alerts`) - requires zo-discord
 - Omit for silent agents (no notifications)
+
+*Note: only zo-discord will work with a zo-hermes backend.*
 
 ### Custom Channels
 

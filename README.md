@@ -20,7 +20,7 @@ A general-purpose agent dispatcher for [Zo Computer](https://zo.computer) — fr
 - Business hours queueing — notifications held until your configured window
 
 **Multi-Backend**
-- Dispatch to the Zo API (`backend: zo`) or a local [Hermes Agent](https://github.com/NousResearch/hermes-agent) instance (`backend: hermes`)
+- Dispatch to the Zo API (`backend: zo`) or a local [Hermes Agent](https://github.com/NousResearch/hermes-agent) instance (`backend: hermes`) – requires zo-hermes
 - Set `default_backend` in `config/config.json` to choose which backend agents use when they omit `backend`
 - Hermes agents support per-agent reasoning effort, iteration limits, memory/context toggles, and toolset restrictions
 
@@ -138,6 +138,7 @@ What that unlocks:
 - local Hermes execution for that agent
 - per-agent Hermes controls: `reasoning`, `max_iterations`, `skip_memory`, `skip_context`, `tools`, `tools_deny`
 - direct pairing with `notify_channel: discord/<channel-name>` when you want Hermes-backed work to land in a `zo-discord` thread
+- reuse of the same agent file format, with the caveat that Zo `persona` frontmatter is currently meaningful only on the Zo backend. Hermes dispatch still accepts the field in the schema, but `zo-hermes` does not map it to a Hermes personality
 
 Scope boundaries:
 
