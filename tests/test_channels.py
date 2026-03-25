@@ -133,13 +133,19 @@ class TestCustomChannelDelivery:
             d.http_session = CapturingSession()
             channel_config = d.config["channels"]["discord"]
             result = await d._post_to_channel(
-                channel_config, "Test Title", "Test content", "general", "con_123"
+                channel_config,
+                "Test Title",
+                "Test content",
+                "general",
+                "con_123",
+                "con_123",
             )
             assert captured["url"] == "http://localhost:8787/notify"
             assert captured["json"]["channel_name"] == "general"
             assert captured["json"]["title"] == "Test Title"
             assert captured["json"]["content"] == "Test content"
             assert captured["json"]["conversation_id"] == "con_123"
+            assert captured["json"]["honcho_session_key"] == "con_123"
             assert result["success"] is True
 
         asyncio.run(run())
@@ -540,6 +546,26 @@ class TestNotifyLevels:
             assert len(notify_calls) == 0
 
         asyncio.run(run())
+        os.unlink(tmpdb)
+
+    def test_hermes_notification_flow_passes_conv_id_as_honcho_session_key(self):
+        d, tmpdb = make_dispatcher({"default_backend": "hermes"})
+        agent = make_agent(backend="hermes", notify="always", notify_channel="discord/general")
+        notify_calls = []
+
+        async def track_notify(*args, **kwargs):
+            notify_calls.append(kwargs)
+
+        async def run():
+            d.call_hermes = AsyncMock(return_value=("Agent output", "conv-1"))
+            d._notify = track_notify
+            d.db.mark_run = MagicMock()
+            await d.dispatch_agent(agent)
+
+        asyncio.run(run())
+        assert len(notify_calls) == 1
+        assert notify_calls[0]["conv_id"] == "conv-1"
+        assert notify_calls[0]["honcho_session_key"] == "conv-1"
         os.unlink(tmpdb)
 
     def test_notify_errors_sends_on_failure(self):

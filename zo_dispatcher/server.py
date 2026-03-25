@@ -179,8 +179,15 @@ class Dispatcher:
                 raise RuntimeError(f"MCP tool error: {data['error']}")
             return data.get("result", {})
 
-    def _queue_notification(self, channel_spec: str, title: str, content: str, conv_id: str = ""):
-        self.db.queue_notification(channel_spec, title, content, conv_id)
+    def _queue_notification(
+        self,
+        channel_spec: str,
+        title: str,
+        content: str,
+        conv_id: str = "",
+        honcho_session_key: str = "",
+    ):
+        self.db.queue_notification(channel_spec, title, content, conv_id, honcho_session_key)
         logger.info(f"Queued notification '{title}' for business hours")
 
     async def _drain_notification_queue(self):
@@ -198,11 +205,18 @@ class Dispatcher:
                     title=notif["title"],
                     content=notif["content"],
                     conv_id=notif.get("conv_id", ""),
+                    honcho_session_key=notif.get("honcho_session_key", ""),
                 )
             except Exception:
                 failed.append(notif)
         for notif in failed:
-            self.db.queue_notification(notif["channel_spec"], notif["title"], notif["content"], notif.get("conv_id", ""))
+            self.db.queue_notification(
+                notif["channel_spec"],
+                notif["title"],
+                notif["content"],
+                notif.get("conv_id", ""),
+                notif.get("honcho_session_key", ""),
+            )
 
     def scan_agents(self) -> list[dict]:
         agents = []
@@ -607,12 +621,15 @@ class Dispatcher:
         return output, conv_id
 
     async def _post_to_channel(self, channel_config: dict, title: str, content: str,
-                               discord_channel: str | None = None, conv_id: str = ""):
+                               discord_channel: str | None = None, conv_id: str = "",
+                               honcho_session_key: str = ""):
         payload = {
             "title": title,
             "content": content,
             "conversation_id": conv_id,
         }
+        if honcho_session_key:
+            payload["honcho_session_key"] = honcho_session_key
         if discord_channel:
             payload["channel_name"] = discord_channel
 
@@ -627,7 +644,8 @@ class Dispatcher:
                 error = await resp.text()
                 raise RuntimeError(f"Channel notification failed: {resp.status} {error}")
 
-    async def _deliver(self, channel_spec: str, title: str, content: str, conv_id: str = ""):
+    async def _deliver(self, channel_spec: str, title: str, content: str, conv_id: str = "",
+                       honcho_session_key: str = ""):
         parts = channel_spec.split("/", 1)
         channel_name = parts[0]
         discord_channel = parts[1] if len(parts) > 1 else None
@@ -644,7 +662,14 @@ class Dispatcher:
                 await asyncio.sleep(delay)
             try:
                 if channel_config:
-                    await self._post_to_channel(channel_config, title, content, discord_channel, conv_id)
+                    await self._post_to_channel(
+                        channel_config,
+                        title,
+                        content,
+                        discord_channel,
+                        conv_id,
+                        honcho_session_key,
+                    )
                 else:
                     tool_name, build_payload = BUILTIN_CHANNELS[channel_name]
                     await self._call_mcp_tool(tool_name, build_payload(title, content))
@@ -678,11 +703,11 @@ class Dispatcher:
         return prompt
 
     async def _notify(self, channel_spec: str, title: str, content: str,
-                       conv_id: str = ""):
+                       conv_id: str = "", honcho_session_key: str = ""):
         if not self._is_business_hours():
-            self._queue_notification(channel_spec, title, content, conv_id)
+            self._queue_notification(channel_spec, title, content, conv_id, honcho_session_key)
             return
-        await self._deliver(channel_spec, title, content, conv_id)
+        await self._deliver(channel_spec, title, content, conv_id, honcho_session_key)
 
     async def dispatch_agent(self, agent: dict, context: dict | None = None,
                              queue_file: Path | None = None):
@@ -761,7 +786,14 @@ class Dispatcher:
         self.db.mark_run(agent_id, status="success", conv_id=conv_id, duration=duration)
 
         if notify == "always" and notify_channel:
-            await self._notify(notify_channel, title, output, conv_id)
+            honcho_session_key = conv_id if backend == "hermes" else ""
+            await self._notify(
+                notify_channel,
+                title,
+                output,
+                conv_id=conv_id,
+                honcho_session_key=honcho_session_key,
+            )
 
         await self._handle_max_runs(agent)
 

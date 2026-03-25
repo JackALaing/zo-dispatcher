@@ -56,6 +56,7 @@ class DispatcherDB:
                 title TEXT NOT NULL,
                 content TEXT NOT NULL,
                 conv_id TEXT DEFAULT '',
+                honcho_session_key TEXT DEFAULT '',
                 queued_at TEXT NOT NULL
             );
 
@@ -74,6 +75,11 @@ class DispatcherDB:
             self.conn.commit()
         if "disabled" not in columns:
             self.conn.execute("ALTER TABLE webhooks ADD COLUMN disabled BOOLEAN DEFAULT 0")
+            self.conn.commit()
+
+        pending_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(pending_notifications)").fetchall()}
+        if "honcho_session_key" not in pending_columns:
+            self.conn.execute("ALTER TABLE pending_notifications ADD COLUMN honcho_session_key TEXT DEFAULT ''")
             self.conn.commit()
 
     def get_last_run(self, agent_id: str) -> datetime | None:
@@ -197,11 +203,18 @@ class DispatcherDB:
         ).fetchone()
         return row[0]
 
-    def queue_notification(self, channel_spec: str, title: str, content: str, conv_id: str = ""):
+    def queue_notification(
+        self,
+        channel_spec: str,
+        title: str,
+        content: str,
+        conv_id: str = "",
+        honcho_session_key: str = "",
+    ):
         now = datetime.now(timezone.utc).isoformat()
         self.conn.execute(
-            "INSERT INTO pending_notifications (channel_spec, title, content, conv_id, queued_at) VALUES (?, ?, ?, ?, ?)",
-            (channel_spec, title, content, conv_id, now)
+            "INSERT INTO pending_notifications (channel_spec, title, content, conv_id, honcho_session_key, queued_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (channel_spec, title, content, conv_id, honcho_session_key, now)
         )
         self.conn.commit()
 
