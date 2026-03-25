@@ -701,6 +701,12 @@ class Dispatcher:
             if backend == "hermes":
                 tools = agent.get("tools")
                 tools_deny = agent.get("tools_deny")
+                if agent.get("persona"):
+                    logger.warning(
+                        "Agent '%s' requested persona %s on Hermes backend; zo-hermes ignores Zo persona IDs and will continue with the current Hermes personality/prompt setup.",
+                        agent_id,
+                        agent.get("persona"),
+                    )
                 output, conv_id = await self.call_hermes(
                     prompt,
                     model=agent.get("model"),
