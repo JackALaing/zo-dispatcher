@@ -346,6 +346,8 @@ class Dispatcher:
             return agents
 
         for f in sorted(self.agents_dir.rglob("*.md")):
+            if f.name.lower() in {"readme.md", "readme.markdown"}:
+                continue
             agent, error = parse_agent_file(f, self.agents_dir)
             if error:
                 rel = str(f.relative_to(self.agents_dir))

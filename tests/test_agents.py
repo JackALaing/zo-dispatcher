@@ -1389,6 +1389,24 @@ Do the thing.
         assert len(agents) == 1
         assert agents[0]["active"] is False
 
+    def test_scan_agents_ignores_readme_markdown_files(self, tmp_path):
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        (agents_dir / "pulse").mkdir(parents=True)
+        (agents_dir / "pulse" / "README.md").write_text("# Pulse docs\n")
+        agent_file = agents_dir / "pulse" / "topic.md"
+        agent_file.write_text(MAX_RUNS_SCHEDULE)
+
+        d = self._make_dispatcher(tmp_path)
+        d.agents_dir = agents_dir
+        d._last_parser_error_fingerprint = None
+        d._last_parser_warning_fingerprint = None
+        d.config = {"system_notification_channel": None}
+
+        agents = d.scan_agents()
+        assert len(agents) == 1
+        assert agents[0]["id"] == "pulse/topic"
+
 
 # --- Lifecycle behavior tests ---
 
