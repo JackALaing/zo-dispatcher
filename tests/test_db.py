@@ -38,6 +38,29 @@ class TestTableCreation:
 # --- Agent runs ---
 
 class TestAgentRuns:
+    def test_begin_and_finish_run_updates_same_row(self, db):
+        started_at = datetime.now(timezone.utc)
+        run_id = db.begin_run(
+            "test/agent",
+            event_type="webhook.event",
+            source="stripe",
+            dispatched_at=started_at,
+        )
+
+        row = db.conn.execute("SELECT * FROM agent_runs WHERE id = ?", (run_id,)).fetchone()
+        assert row is not None
+        assert row["agent_id"] == "test/agent"
+        assert row["status"] == "started"
+        assert row["event_type"] == "webhook.event"
+        assert row["source"] == "stripe"
+
+        db.finish_run(run_id, status="success", conv_id="conv-1", duration=12.5)
+        updated = db.conn.execute("SELECT * FROM agent_runs WHERE id = ?", (run_id,)).fetchone()
+        assert updated["status"] == "success"
+        assert updated["conv_id"] == "conv-1"
+        assert updated["duration_seconds"] == 12.5
+        assert db.conn.execute("SELECT COUNT(*) FROM agent_runs").fetchone()[0] == 1
+
     def test_mark_and_get_last_run(self, db):
         now = datetime.now(timezone.utc)
         db.mark_run("test/agent", dispatched_at=now, conv_id="conv_1")
@@ -174,14 +197,16 @@ class TestDeduplication:
 
 class TestNotificationQueue:
     def test_queue_and_pop(self, db):
-        db.queue_notification("discord/general", "Title", "Content", "con_1")
+        db.queue_notification("discord/general", "Title", "Content", "con_1", "dispatcher-test-agent-7")
         db.queue_notification("sms", "Title 2", "Content 2")
 
         pending = db.pop_pending_notifications()
         assert len(pending) == 2
         assert pending[0]["channel_spec"] == "discord/general"
         assert pending[0]["title"] == "Title"
+        assert pending[0]["honcho_session_key"] == "dispatcher-test-agent-7"
         assert pending[1]["channel_spec"] == "sms"
+        assert pending[1]["honcho_session_key"] == ""
 
         remaining = db.pop_pending_notifications()
         assert len(remaining) == 0

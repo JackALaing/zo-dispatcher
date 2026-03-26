@@ -9,7 +9,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from zo_dispatcher.server import Dispatcher
+from zo_dispatcher.server import (
+    Dispatcher,
+    build_dispatcher_honcho_session_key,
+    sanitize_honcho_key_component,
+)
 from zo_dispatcher.db import DispatcherDB
 from zo_dispatcher.channels import CHANNEL_RETRY_DELAYS, BUILTIN_CHANNELS
 
@@ -70,6 +74,7 @@ def make_agent(**overrides):
         "rate_limit": None,
         "max_runs": None,
         "expires_at": None,
+        "honcho_session_scope": None,
         "prompt": "Do a thing.",
     }
     base.update(overrides)
@@ -178,6 +183,7 @@ class TestCustomChannelDelivery:
                 skip_context=True,
                 enabled_toolsets=["web", "file"],
                 disabled_toolsets=["rl"],
+                honcho_session_key="dispatcher-schedules-test-agent-7",
             )
             assert output == "done"
             assert conv_id == "conv-1"
@@ -192,6 +198,7 @@ class TestCustomChannelDelivery:
         assert payload["skip_context"] is True
         assert payload["enabled_toolsets"] == ["web", "file"]
         assert payload["disabled_toolsets"] == ["rl"]
+        assert payload["honcho_session_key"] == "dispatcher-schedules-test-agent-7"
         os.unlink(tmpdb)
 
     def test_call_hermes_omits_falsey_optional_fields(self):
@@ -214,6 +221,7 @@ class TestCustomChannelDelivery:
         assert "skip_context" not in payload
         assert "enabled_toolsets" not in payload
         assert "disabled_toolsets" not in payload
+        assert "honcho_session_key" not in payload
         os.unlink(tmpdb)
 
     def test_call_hermes_preserves_conversation_id_on_error(self):
@@ -234,6 +242,11 @@ class TestCustomChannelDelivery:
         asyncio.run(run())
         os.unlink(tmpdb)
 
+    def test_dispatcher_honcho_key_helpers(self):
+        assert sanitize_honcho_key_component("pulse/ai-news") == "pulse-ai-news"
+        assert build_dispatcher_honcho_session_key("pulse/ai-news", "per-agent", 12) == "dispatcher-pulse-ai-news"
+        assert build_dispatcher_honcho_session_key("pulse/ai-news", "per-dispatch", 12) == "dispatcher-pulse-ai-news-12"
+
     def test_dispatch_agent_passes_hermes_frontmatter(self):
         d, tmpdb = make_dispatcher()
         agent = make_agent(
@@ -248,15 +261,18 @@ class TestCustomChannelDelivery:
 
         async def run():
             with patch.object(d, "call_hermes", AsyncMock(return_value=("done", "conv-1"))) as call_hermes:
-                d.db.mark_run = MagicMock()
-                await d.dispatch_agent(agent)
-                kwargs = call_hermes.await_args.kwargs
-                assert kwargs["reasoning_effort"] == "medium"
-                assert kwargs["max_iterations"] == 5
-                assert kwargs["skip_memory"] is True
-                assert kwargs["skip_context"] is True
-                assert kwargs["enabled_toolsets"] == ["web", "terminal"]
-                assert kwargs["disabled_toolsets"] is None
+                with patch.object(d, "_is_hermes_honcho_active", return_value=True):
+                    d.db.begin_run = MagicMock(return_value=7)
+                    d.db.finish_run = MagicMock()
+                    await d.dispatch_agent(agent)
+                    kwargs = call_hermes.await_args.kwargs
+                    assert kwargs["reasoning_effort"] == "medium"
+                    assert kwargs["max_iterations"] == 5
+                    assert kwargs["skip_memory"] is True
+                    assert kwargs["skip_context"] is True
+                    assert kwargs["enabled_toolsets"] == ["web", "terminal"]
+                    assert kwargs["disabled_toolsets"] is None
+                    assert kwargs["honcho_session_key"] == "dispatcher-schedules-test-agent-7"
 
         asyncio.run(run())
         os.unlink(tmpdb)
@@ -268,10 +284,13 @@ class TestCustomChannelDelivery:
         async def run():
             with patch.object(d, "call_hermes", AsyncMock(return_value=("done", "conv-1"))) as call_hermes:
                 with patch.object(d, "call_zo_ask", AsyncMock()) as call_zo_ask:
-                    d.db.mark_run = MagicMock()
-                    await d.dispatch_agent(agent)
-                    call_hermes.assert_awaited_once()
-                    call_zo_ask.assert_not_called()
+                    with patch.object(d, "_is_hermes_honcho_active", return_value=True):
+                        d.db.begin_run = MagicMock(return_value=3)
+                        d.db.finish_run = MagicMock()
+                        await d.dispatch_agent(agent)
+                        call_hermes.assert_awaited_once()
+                        call_zo_ask.assert_not_called()
+                        assert call_hermes.await_args.kwargs["honcho_session_key"] == "dispatcher-schedules-test-agent-3"
 
         asyncio.run(run())
         os.unlink(tmpdb)
@@ -283,10 +302,17 @@ class TestCustomChannelDelivery:
         async def run():
             with patch.object(d, "call_zo_ask", AsyncMock(return_value=("done", "conv-1"))) as call_zo_ask:
                 with patch.object(d, "call_hermes", AsyncMock()) as call_hermes:
-                    d.db.mark_run = MagicMock()
+                    d.db.begin_run = MagicMock(return_value=4)
+                    d.db.finish_run = MagicMock()
                     await d.dispatch_agent(agent)
                     call_zo_ask.assert_awaited_once()
                     call_hermes.assert_not_called()
+                    d.db.begin_run.assert_called_once()
+                    d.db.finish_run.assert_called_once()
+                    assert d.db.finish_run.call_args.args == (4,)
+                    assert d.db.finish_run.call_args.kwargs["status"] == "success"
+                    assert d.db.finish_run.call_args.kwargs["conv_id"] == "conv-1"
+                    assert d.db.finish_run.call_args.kwargs["duration"] >= 0
 
         asyncio.run(run())
         os.unlink(tmpdb)
@@ -303,15 +329,106 @@ class TestCustomChannelDelivery:
 
         async def run():
             with patch.object(d, "call_hermes", AsyncMock(return_value=("done", "conv-1"))) as call_hermes:
-                d.db.mark_run = MagicMock()
-                await d.dispatch_agent(agent)
-                kwargs = call_hermes.await_args.kwargs
-                assert kwargs["enabled_toolsets"] is None
-                assert kwargs["disabled_toolsets"] == ["browser"]
-                assert kwargs["skip_memory"] is False
-                assert kwargs["skip_context"] is False
+                with patch.object(d, "_is_hermes_honcho_active", return_value=True):
+                    d.db.begin_run = MagicMock(return_value=9)
+                    d.db.finish_run = MagicMock()
+                    await d.dispatch_agent(agent)
+                    kwargs = call_hermes.await_args.kwargs
+                    assert kwargs["enabled_toolsets"] is None
+                    assert kwargs["disabled_toolsets"] == ["browser"]
+                    assert kwargs["skip_memory"] is False
+                    assert kwargs["skip_context"] is False
+                    assert kwargs["honcho_session_key"] == "dispatcher-schedules-test-agent-9"
 
         asyncio.run(run())
+        os.unlink(tmpdb)
+
+    def test_dispatch_agent_uses_per_agent_honcho_key_across_dispatches(self):
+        d, tmpdb = make_dispatcher()
+        agent = make_agent(backend="hermes", honcho_session_scope="per-agent", notify="never")
+        seen_keys = []
+
+        async def fake_call_hermes(*args, **kwargs):
+            seen_keys.append(kwargs["honcho_session_key"])
+            return "done", f"conv-{len(seen_keys)}"
+
+        async def run():
+            d.call_hermes = fake_call_hermes
+            with patch.object(d, "_is_hermes_honcho_active", return_value=True):
+                await d.dispatch_agent(agent)
+                await d.dispatch_agent(agent)
+
+        asyncio.run(run())
+        assert seen_keys == [
+            "dispatcher-schedules-test-agent",
+            "dispatcher-schedules-test-agent",
+        ]
+        rows = d.db.conn.execute("SELECT id, status FROM agent_runs ORDER BY id").fetchall()
+        assert len(rows) == 2
+        assert [row["status"] for row in rows] == ["success", "success"]
+        os.unlink(tmpdb)
+
+    def test_dispatch_agent_defaults_to_per_dispatch_honcho_key_when_active(self):
+        d, tmpdb = make_dispatcher()
+        agent = make_agent(backend="hermes", notify="never")
+        seen_keys = []
+
+        async def fake_call_hermes(*args, **kwargs):
+            seen_keys.append(kwargs["honcho_session_key"])
+            return "done", f"conv-{len(seen_keys)}"
+
+        async def run():
+            d.call_hermes = fake_call_hermes
+            with patch.object(d, "_is_hermes_honcho_active", return_value=True):
+                await d.dispatch_agent(agent)
+                await d.dispatch_agent(agent)
+
+        asyncio.run(run())
+        assert seen_keys == [
+            "dispatcher-schedules-test-agent-1",
+            "dispatcher-schedules-test-agent-2",
+        ]
+        rows = d.db.conn.execute("SELECT id, status FROM agent_runs ORDER BY id").fetchall()
+        assert len(rows) == 2
+        assert [row["id"] for row in rows] == [1, 2]
+        assert [row["status"] for row in rows] == ["success", "success"]
+        os.unlink(tmpdb)
+
+    def test_dispatch_agent_omits_honcho_key_when_honcho_inactive(self):
+        d, tmpdb = make_dispatcher()
+        agent = make_agent(backend="hermes", honcho_session_scope="per-agent", notify="never")
+
+        async def run():
+            with patch.object(d, "call_hermes", AsyncMock(return_value=("done", "conv-1"))) as call_hermes:
+                with patch.object(d, "_is_hermes_honcho_active", return_value=False):
+                    await d.dispatch_agent(agent)
+                    assert call_hermes.await_args.kwargs["honcho_session_key"] is None
+
+        asyncio.run(run())
+        os.unlink(tmpdb)
+
+    def test_dispatch_agent_creates_run_row_before_hermes_call(self):
+        d, tmpdb = make_dispatcher()
+        agent = make_agent(backend="hermes", notify="never")
+        seen_rows = []
+
+        async def fake_call_hermes(*args, **kwargs):
+            rows = d.db.conn.execute("SELECT * FROM agent_runs ORDER BY id").fetchall()
+            seen_rows.append(dict(rows[0]))
+            return "done", "conv-1"
+
+        async def run():
+            d.call_hermes = fake_call_hermes
+            with patch.object(d, "_is_hermes_honcho_active", return_value=True):
+                await d.dispatch_agent(agent)
+
+        asyncio.run(run())
+        assert len(seen_rows) == 1
+        assert seen_rows[0]["status"] == "started"
+        assert seen_rows[0]["conv_id"] == ""
+        final_row = d.db.conn.execute("SELECT * FROM agent_runs ORDER BY id DESC LIMIT 1").fetchone()
+        assert final_row["status"] == "success"
+        assert final_row["conv_id"] == "conv-1"
         os.unlink(tmpdb)
 
     def test_deliver_routes_to_post(self):
@@ -440,12 +557,16 @@ class TestBusinessHours:
                 channel_spec="discord/general",
                 title="[FAILED] Queued Test",
                 content="Should be queued",
+                conv_id="conv-queued",
+                honcho_session_key="dispatcher-schedules-test-agent-11",
             )
 
             pending = d.db.conn.execute("SELECT * FROM pending_notifications").fetchall()
             assert len(pending) == 1
             assert pending[0]["title"] == "[FAILED] Queued Test"
             assert pending[0]["channel_spec"] == "discord/general"
+            assert pending[0]["conv_id"] == "conv-queued"
+            assert pending[0]["honcho_session_key"] == "dispatcher-schedules-test-agent-11"
 
             d._deliver = track_deliver
             await d._drain_notification_queue()
@@ -459,6 +580,10 @@ class TestBusinessHours:
             d._deliver = Dispatcher._deliver.__get__(d)
             d.http_session = FakeSession()
             await d._drain_notification_queue()
+
+            assert len(d.http_session.calls) == 1
+            assert d.http_session.calls[0]["json"]["conversation_id"] == "conv-queued"
+            assert d.http_session.calls[0]["json"]["honcho_session_key"] == "dispatcher-schedules-test-agent-11"
 
             remaining = d.db.conn.execute("SELECT * FROM pending_notifications").fetchall()
             assert len(remaining) == 0
@@ -577,7 +702,7 @@ class TestNotifyLevels:
         asyncio.run(run())
         os.unlink(tmpdb)
 
-    def test_hermes_notification_flow_passes_conv_id_as_honcho_session_key(self):
+    def test_hermes_notification_flow_uses_dispatcher_honcho_session_key(self):
         d, tmpdb = make_dispatcher({"default_backend": "hermes"})
         agent = make_agent(backend="hermes", notify="always", notify_channel="discord/general")
         notify_calls = []
@@ -588,13 +713,13 @@ class TestNotifyLevels:
         async def run():
             d.call_hermes = AsyncMock(return_value=("Agent output", "conv-1"))
             d._notify = track_notify
-            d.db.mark_run = MagicMock()
-            await d.dispatch_agent(agent)
+            with patch.object(d, "_is_hermes_honcho_active", return_value=True):
+                await d.dispatch_agent(agent)
 
         asyncio.run(run())
         assert len(notify_calls) == 1
         assert notify_calls[0]["conv_id"] == "conv-1"
-        assert notify_calls[0]["honcho_session_key"] == "conv-1"
+        assert notify_calls[0]["honcho_session_key"] == "dispatcher-schedules-test-agent-1"
         os.unlink(tmpdb)
 
     def test_notify_errors_sends_on_failure(self):
@@ -620,7 +745,7 @@ class TestNotifyLevels:
         asyncio.run(run())
         os.unlink(tmpdb)
 
-    def test_hermes_failure_notifies_with_conversation_id_and_honcho_key(self):
+    def test_hermes_failure_notifies_with_conversation_id_and_dispatcher_honcho_key(self):
         d, tmpdb = make_dispatcher({"default_backend": "hermes"})
         agent = make_agent(backend="hermes", notify="errors", notify_channel="discord/general")
         notify_calls = []
@@ -637,13 +762,14 @@ class TestNotifyLevels:
         async def run():
             d.call_hermes = fake_hermes_fail
             d._notify = track_notify
-            d.db.mark_run = MagicMock()
-            await d.dispatch_agent(agent)
-            d.db.mark_run.assert_called_once()
-            assert d.db.mark_run.call_args.kwargs["conv_id"] == "conv-err"
+            with patch.object(d, "_is_hermes_honcho_active", return_value=True):
+                await d.dispatch_agent(agent)
+            row = d.db.conn.execute("SELECT * FROM agent_runs ORDER BY id DESC LIMIT 1").fetchone()
+            assert row["conv_id"] == "conv-err"
+            assert row["status"] == "failure"
             assert len(notify_calls) == 1
             assert notify_calls[0]["conv_id"] == "conv-err"
-            assert notify_calls[0]["honcho_session_key"] == "conv-err"
+            assert notify_calls[0]["honcho_session_key"] == "dispatcher-schedules-test-agent-1"
             assert "[FAILED]" in notify_calls[0]["title"]
 
         import zo_dispatcher.server as dmodule

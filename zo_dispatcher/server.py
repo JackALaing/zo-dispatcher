@@ -22,6 +22,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
 from zoneinfo import ZoneInfo
 
 from zo_dispatcher.db import DispatcherDB
@@ -30,6 +31,8 @@ from zo_dispatcher.webhooks import verify_signature, apply_transform, event_matc
 from zo_dispatcher.channels import BUILTIN_CHANNELS, MCP_URL, CHANNEL_RETRY_DELAYS
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "config.json"
+DEFAULT_HONCHO_SESSION_SCOPE = "per-dispatch"
+HERMES_CONFIG_PATH = Path(os.environ.get("HERMES_CONFIG_PATH", "~/.hermes/config.yaml")).expanduser()
 
 # Empirically discovered Zo API error substrings when all compute sessions are occupied.
 # If these change upstream, pool retry will stop triggering (falls through to hard error).
@@ -81,6 +84,21 @@ def compute_jitter(agent_id: str, max_jitter: int) -> float:
     return h % max_jitter
 
 
+def sanitize_honcho_key_component(value: str) -> str:
+    sanitized = re.sub(r"[^A-Za-z0-9_-]+", "-", value.replace("/", "-"))
+    sanitized = re.sub(r"-+", "-", sanitized).strip("-_")
+    return sanitized or "agent"
+
+
+def build_dispatcher_honcho_session_key(agent_id: str, scope: str, run_id: int) -> str:
+    sanitized_agent_id = sanitize_honcho_key_component(agent_id)
+    if scope == "per-agent":
+        return f"dispatcher-{sanitized_agent_id}"
+    if scope == "per-dispatch":
+        return f"dispatcher-{sanitized_agent_id}-{run_id}"
+    raise ValueError(f"Unsupported honcho session scope: {scope!r}")
+
+
 class Dispatcher:
     def __init__(self, config: dict):
         self.config = config
@@ -124,6 +142,8 @@ class Dispatcher:
             self._config_mtime: float = CONFIG_PATH.stat().st_mtime
         except OSError:
             self._config_mtime: float = 0
+        self._hermes_config_mtime: float | None = None
+        self._hermes_honcho_active: bool | None = None
 
     def _refresh_agents(self):
         self._agents = self.scan_agents()
@@ -139,6 +159,63 @@ class Dispatcher:
     async def _dispatch_with_limit(self, agent: dict, context: dict | None = None):
         async with self._dispatch_semaphore:
             await self.dispatch_agent(agent, context)
+
+    def _hermes_config_path(self) -> Path:
+        configured_path = self.config.get("hermes_config_path") if hasattr(self, "config") else None
+        if configured_path:
+            return Path(configured_path).expanduser()
+        return HERMES_CONFIG_PATH
+
+    def _is_hermes_honcho_active(self) -> bool:
+        config_path = self._hermes_config_path()
+        try:
+            mtime = config_path.stat().st_mtime
+        except OSError:
+            self._hermes_config_mtime = None
+            self._hermes_honcho_active = False
+            return False
+
+        cached_active = getattr(self, "_hermes_honcho_active", None)
+        if getattr(self, "_hermes_config_mtime", None) == mtime and cached_active is not None:
+            return cached_active
+
+        try:
+            config = yaml.safe_load(config_path.read_text()) or {}
+        except Exception as e:
+            logger.debug(f"Failed to read Hermes config {config_path}: {e}")
+            active = False
+        else:
+            honcho_cfg = config.get("honcho")
+            if isinstance(honcho_cfg, bool):
+                active = honcho_cfg
+            elif isinstance(honcho_cfg, dict):
+                active = honcho_cfg.get("enabled", True) is not False
+            else:
+                active = honcho_cfg is not None
+
+        self._hermes_config_mtime = mtime
+        self._hermes_honcho_active = active
+        return active
+
+    def _resolve_honcho_session_scope(self, agent: dict, backend: str) -> str | None:
+        configured_scope = agent.get("honcho_session_scope")
+        if backend != "hermes":
+            if configured_scope:
+                logger.debug(
+                    "Ignoring honcho_session_scope=%s for non-Hermes agent '%s'",
+                    configured_scope,
+                    agent["id"],
+                )
+            return None
+        if not self._is_hermes_honcho_active():
+            return None
+        return configured_scope or DEFAULT_HONCHO_SESSION_SCOPE
+
+    def _resolve_honcho_session_key(self, agent: dict, backend: str, run_id: int) -> str:
+        scope = self._resolve_honcho_session_scope(agent, backend)
+        if not scope:
+            return ""
+        return build_dispatcher_honcho_session_key(agent["id"], scope, run_id)
 
     def _maybe_reload_config(self):
         try:
@@ -600,7 +677,8 @@ class Dispatcher:
                           skip_memory: bool | None = None,
                           skip_context: bool | None = None,
                           enabled_toolsets: list[str] | None = None,
-                          disabled_toolsets: list[str] | None = None) -> tuple[str, str]:
+                          disabled_toolsets: list[str] | None = None,
+                          honcho_session_key: str | None = None) -> tuple[str, str]:
         """Call hermes-api (non-streaming) — same contract as call_zo_ask."""
         payload = {
             "input": prompt,
@@ -620,6 +698,8 @@ class Dispatcher:
             payload["enabled_toolsets"] = enabled_toolsets
         if disabled_toolsets:
             payload["disabled_toolsets"] = disabled_toolsets
+        if honcho_session_key:
+            payload["honcho_session_key"] = honcho_session_key
 
         timeout = aiohttp.ClientTimeout(
             total=timeout_seconds or self.config.get("zo_ask_timeout_seconds", 1800)
@@ -745,6 +825,16 @@ class Dispatcher:
         logger.info(f"Dispatching agent '{agent_id}' ({title})")
 
         backend = agent.get("backend") or self.default_backend
+        event_type = context.get("event_type", "") if context else ""
+        source = context.get("source", "") if context else ""
+        run_id = self.db.begin_run(
+            agent_id,
+            status="started",
+            event_type=event_type,
+            source=source,
+        )
+        honcho_session_key = self._resolve_honcho_session_key(agent, backend, run_id)
+
         conv_id = ""
         try:
             if backend == "hermes":
@@ -766,6 +856,7 @@ class Dispatcher:
                     skip_context=agent.get("skip_context"),
                     enabled_toolsets=tools if isinstance(tools, list) else None,
                     disabled_toolsets=tools_deny if isinstance(tools_deny, list) else None,
+                    honcho_session_key=honcho_session_key or None,
                 )
             else:
                 output, conv_id = await self.call_zo_ask(
@@ -779,10 +870,9 @@ class Dispatcher:
             duration = time.monotonic() - start_time
             error_conv_id = getattr(e, "conv_id", "") or conv_id
             logger.error(f"Agent '{agent_id}' failed: {e}")
-            self.db.mark_run(agent_id, status="failure", conv_id=error_conv_id, duration=duration)
+            self.db.finish_run(run_id, status="failure", conv_id=error_conv_id, duration=duration)
 
             if notify != "never" and notify_channel:
-                honcho_session_key = error_conv_id if backend == "hermes" and error_conv_id else ""
                 await self._notify(
                     channel_spec=notify_channel,
                     title=f"[FAILED] {title}",
@@ -796,7 +886,7 @@ class Dispatcher:
 
         if not output or not output.strip():
             logger.error(f"Agent '{agent_id}' empty response (conv {conv_id})")
-            self.db.mark_run(agent_id, status="failure", conv_id=conv_id, duration=duration)
+            self.db.finish_run(run_id, status="failure", conv_id=conv_id, duration=duration)
 
             if notify != "never" and notify_channel:
                 await self._notify(
@@ -806,15 +896,15 @@ class Dispatcher:
                             f"**Conversation**: `{conv_id}`\n\n"
                             f"Open the conversation and send \"Please continue\".",
                     conv_id=conv_id,
+                    honcho_session_key=honcho_session_key,
                 )
             return
 
         # Success
         logger.info(f"Agent '{agent_id}' completed (conv {conv_id}, {len(output)} chars, {duration:.1f}s)")
-        self.db.mark_run(agent_id, status="success", conv_id=conv_id, duration=duration)
+        self.db.finish_run(run_id, status="success", conv_id=conv_id, duration=duration)
 
         if notify == "always" and notify_channel:
-            honcho_session_key = conv_id if backend == "hermes" else ""
             await self._notify(
                 notify_channel,
                 title,
@@ -938,6 +1028,7 @@ class Dispatcher:
         context = {
             "payload": payload,
             "event_type": event_type or "",
+            "source": source,
         }
 
         task = asyncio.create_task(self._dispatch_webhook_agents(source, matched, context))

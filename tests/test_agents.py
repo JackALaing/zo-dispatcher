@@ -137,6 +137,7 @@ Minimal agent.
         assert agent["rate_limit"] is None
         assert agent["max_runs"] is None
         assert agent["expires_at"] is None
+        assert agent["honcho_session_scope"] is None
 
     def test_no_frontmatter(self, agents_dir):
         f = write_agent(agents_dir, "schedules/bad.md", "Just a markdown file.\n")
@@ -258,6 +259,37 @@ Hermes agent body.
         assert agent["skip_memory"] is True
         assert agent["skip_context"] is True
         assert agent["tools"] == ["web", "file"]
+
+    @pytest.mark.parametrize("scope", ["per-dispatch", "per-agent"])
+    def test_honcho_session_scope_accepts_allowed_values(self, agents_dir, scope):
+        f = write_agent(agents_dir, f"schedules/{scope}.md", f"""\
+---
+trigger: schedule
+rrule: \"RRULE:FREQ=DAILY;BYHOUR=0\"
+backend: hermes
+honcho_session_scope: {scope}
+---
+
+Hermes honcho scope test.
+""")
+        agent, error = parse_agent_file(f, agents_dir)
+        assert error is None
+        assert agent["honcho_session_scope"] == scope
+
+    def test_honcho_session_scope_rejects_invalid_values(self, agents_dir):
+        f = write_agent(agents_dir, "schedules/invalid-honcho-scope.md", """\
+---
+trigger: schedule
+rrule: "RRULE:FREQ=DAILY;BYHOUR=0"
+backend: hermes
+honcho_session_scope: sticky-forever
+---
+
+Hermes honcho scope test.
+""")
+        agent, error = parse_agent_file(f, agents_dir)
+        assert agent is None
+        assert "honcho_session_scope" in error
 
     def test_tools_and_tools_deny_are_mutually_exclusive(self, agents_dir):
         f = write_agent(agents_dir, "schedules/bad-tools.md", """\

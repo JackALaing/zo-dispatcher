@@ -91,6 +91,29 @@ class DispatcherDB:
             return datetime.fromisoformat(row[0])
         return None
 
+    def begin_run(
+        self,
+        agent_id: str,
+        status: str = "started",
+        event_type: str = "",
+        source: str = "",
+        dispatched_at: datetime | None = None,
+    ) -> int:
+        ts = (dispatched_at or datetime.now(timezone.utc)).isoformat()
+        cursor = self.conn.execute(
+            "INSERT INTO agent_runs (agent_id, dispatched_at, status, conv_id, duration_seconds, event_type, source) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (agent_id, ts, status, "", 0, event_type, source)
+        )
+        self.conn.commit()
+        return int(cursor.lastrowid)
+
+    def finish_run(self, run_id: int, status: str, conv_id: str = "", duration: float = 0):
+        self.conn.execute(
+            "UPDATE agent_runs SET status = ?, conv_id = ?, duration_seconds = ? WHERE id = ?",
+            (status, conv_id, duration, run_id)
+        )
+        self.conn.commit()
+
     def mark_run(self, agent_id: str, status: str = "", conv_id: str = "",
                  duration: float = 0, event_type: str = "", source: str = "",
                  dispatched_at: datetime | None = None):
