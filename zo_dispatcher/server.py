@@ -22,7 +22,6 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import yaml
 from zoneinfo import ZoneInfo
 
 from zo_dispatcher.db import DispatcherDB
@@ -32,7 +31,8 @@ from zo_dispatcher.channels import BUILTIN_CHANNELS, MCP_URL, CHANNEL_RETRY_DELA
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "config.json"
 DEFAULT_HONCHO_SESSION_SCOPE = "per-dispatch"
-HERMES_CONFIG_PATH = Path(os.environ.get("HERMES_CONFIG_PATH", "~/.hermes/config.yaml")).expanduser()
+HONCHO_HOST = "hermes"
+HONCHO_GLOBAL_CONFIG_PATH = Path.home() / ".honcho" / "config.json"
 
 # Empirically discovered Zo API error substrings when all compute sessions are occupied.
 # If these change upstream, pool retry will stop triggering (falls through to hard error).
@@ -160,38 +160,57 @@ class Dispatcher:
         async with self._dispatch_semaphore:
             await self.dispatch_agent(agent, context)
 
-    def _hermes_config_path(self) -> Path:
-        configured_path = self.config.get("hermes_config_path") if hasattr(self, "config") else None
+    def _honcho_config_path(self) -> Path:
+        configured_path = self.config.get("honcho_config_path") if hasattr(self, "config") else None
         if configured_path:
             return Path(configured_path).expanduser()
-        return HERMES_CONFIG_PATH
+
+        hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+        local_path = hermes_home / "honcho.json"
+        if local_path.exists():
+            return local_path
+        return HONCHO_GLOBAL_CONFIG_PATH
 
     def _is_hermes_honcho_active(self) -> bool:
-        config_path = self._hermes_config_path()
+        config_path = self._honcho_config_path()
+        env_api_key = os.environ.get("HONCHO_API_KEY", "").strip()
+        env_base_url = os.environ.get("HONCHO_BASE_URL", "").strip()
+
         try:
             mtime = config_path.stat().st_mtime
         except OSError:
             self._hermes_config_mtime = None
-            self._hermes_honcho_active = False
-            return False
+            active = bool(env_api_key or env_base_url)
+            self._hermes_honcho_active = active
+            return active
 
         cached_active = getattr(self, "_hermes_honcho_active", None)
         if getattr(self, "_hermes_config_mtime", None) == mtime and cached_active is not None:
             return cached_active
 
         try:
-            config = yaml.safe_load(config_path.read_text()) or {}
+            raw = json.loads(config_path.read_text()) or {}
         except Exception as e:
-            logger.debug(f"Failed to read Hermes config {config_path}: {e}")
-            active = False
+            logger.debug(f"Failed to read Honcho config {config_path}: {e}")
+            active = bool(env_api_key or env_base_url)
         else:
-            honcho_cfg = config.get("honcho")
-            if isinstance(honcho_cfg, bool):
-                active = honcho_cfg
-            elif isinstance(honcho_cfg, dict):
-                active = honcho_cfg.get("enabled", True) is not False
+            host_block = (raw.get("hosts") or {}).get(HONCHO_HOST, {})
+            host_enabled = host_block.get("enabled")
+            root_enabled = raw.get("enabled")
+            api_key = host_block.get("apiKey") or raw.get("apiKey") or env_api_key
+            base_url = (
+                host_block.get("baseUrl")
+                or host_block.get("base_url")
+                or raw.get("baseUrl")
+                or raw.get("base_url")
+                or env_base_url
+            )
+            if host_enabled is not None:
+                active = bool(host_enabled)
+            elif root_enabled is not None:
+                active = bool(root_enabled)
             else:
-                active = honcho_cfg is not None
+                active = bool(api_key or base_url)
 
         self._hermes_config_mtime = mtime
         self._hermes_honcho_active = active

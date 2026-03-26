@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -246,6 +247,30 @@ class TestCustomChannelDelivery:
         assert sanitize_honcho_key_component("pulse/ai-news") == "pulse-ai-news"
         assert build_dispatcher_honcho_session_key("pulse/ai-news", "per-agent", 12) == "dispatcher-pulse-ai-news"
         assert build_dispatcher_honcho_session_key("pulse/ai-news", "per-dispatch", 12) == "dispatcher-pulse-ai-news-12"
+
+    def test_honcho_active_detection_uses_honcho_json(self, tmp_path, monkeypatch):
+        d, tmpdb = make_dispatcher({"honcho_config_path": str(tmp_path / "honcho.json")})
+        Path(d.config["honcho_config_path"]).write_text(json.dumps({
+            "hosts": {"hermes": {"enabled": True}},
+            "apiKey": "abc",
+        }))
+        monkeypatch.delenv("HONCHO_API_KEY", raising=False)
+        monkeypatch.delenv("HONCHO_BASE_URL", raising=False)
+
+        try:
+            assert d._is_hermes_honcho_active() is True
+        finally:
+            os.unlink(tmpdb)
+
+    def test_honcho_active_detection_false_without_config_or_env(self, tmp_path, monkeypatch):
+        d, tmpdb = make_dispatcher({"honcho_config_path": str(tmp_path / "missing-honcho.json")})
+        monkeypatch.delenv("HONCHO_API_KEY", raising=False)
+        monkeypatch.delenv("HONCHO_BASE_URL", raising=False)
+
+        try:
+            assert d._is_hermes_honcho_active() is False
+        finally:
+            os.unlink(tmpdb)
 
     def test_dispatch_agent_passes_hermes_frontmatter(self):
         d, tmpdb = make_dispatcher()
