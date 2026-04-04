@@ -8,7 +8,7 @@ from dateutil.rrule import rrulestr
 
 logger = logging.getLogger("zo-dispatcher")
 
-HONCHO_SESSION_SCOPES = {"per-dispatch", "per-agent"}
+MEMORY_SESSION_SCOPES = {"per-dispatch", "per-agent"}
 
 
 def parse_agent_file(filepath: Path, agents_dir: Path) -> tuple[dict | None, str | None]:
@@ -124,12 +124,12 @@ def parse_agent_file(filepath: Path, agents_dir: Path) -> tuple[dict | None, str
         logger.warning(f"Both tools and tools_deny specified in {filepath}")
         return None, "tools and tools_deny are mutually exclusive (use one or the other)"
 
-    honcho_session_scope = frontmatter.get("honcho_session_scope")
-    if honcho_session_scope not in HONCHO_SESSION_SCOPES and honcho_session_scope is not None:
-        logger.warning(f"Invalid honcho_session_scope in {filepath}: {honcho_session_scope!r}")
+    memory_session_scope = frontmatter.get("memory_session_scope")
+    if memory_session_scope not in MEMORY_SESSION_SCOPES and memory_session_scope is not None:
+        logger.warning(f"Invalid memory_session_scope in {filepath}: {memory_session_scope!r}")
         return None, (
-            "honcho_session_scope must be one of "
-            f"{sorted(HONCHO_SESSION_SCOPES)}, got: {honcho_session_scope!r}"
+            "memory_session_scope must be one of "
+            f"{sorted(MEMORY_SESSION_SCOPES)}, got: {memory_session_scope!r}"
         )
 
     warnings = []
@@ -162,7 +162,7 @@ def parse_agent_file(filepath: Path, agents_dir: Path) -> tuple[dict | None, str
         "skip_context": frontmatter.get("skip_context"),
         "tools": frontmatter.get("tools"),
         "tools_deny": frontmatter.get("tools_deny"),
-        "honcho_session_scope": honcho_session_scope,
+        "memory_session_scope": memory_session_scope,
         "prompt": body,
         "_path": str(filepath),
         "_warnings": warnings,

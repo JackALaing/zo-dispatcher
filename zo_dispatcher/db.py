@@ -56,7 +56,7 @@ class DispatcherDB:
                 title TEXT NOT NULL,
                 content TEXT NOT NULL,
                 conv_id TEXT DEFAULT '',
-                honcho_session_key TEXT DEFAULT '',
+                memory_session_title TEXT DEFAULT '',
                 queued_at TEXT NOT NULL
             );
 
@@ -78,8 +78,17 @@ class DispatcherDB:
             self.conn.commit()
 
         pending_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(pending_notifications)").fetchall()}
-        if "honcho_session_key" not in pending_columns:
-            self.conn.execute("ALTER TABLE pending_notifications ADD COLUMN honcho_session_key TEXT DEFAULT ''")
+        if "honcho_session_key" in pending_columns and "memory_session_title" not in pending_columns:
+            self.conn.execute("ALTER TABLE pending_notifications ADD COLUMN memory_session_title TEXT DEFAULT ''")
+            self.conn.execute(
+                """
+                UPDATE pending_notifications
+                SET memory_session_title = COALESCE(NULLIF(memory_session_title, ''), honcho_session_key, '')
+                """
+            )
+            self.conn.commit()
+        if "memory_session_title" not in pending_columns:
+            self.conn.execute("ALTER TABLE pending_notifications ADD COLUMN memory_session_title TEXT DEFAULT ''")
             self.conn.commit()
 
     def get_last_run(self, agent_id: str) -> datetime | None:
@@ -232,12 +241,12 @@ class DispatcherDB:
         title: str,
         content: str,
         conv_id: str = "",
-        honcho_session_key: str = "",
+        memory_session_title: str = "",
     ):
         now = datetime.now(timezone.utc).isoformat()
         self.conn.execute(
-            "INSERT INTO pending_notifications (channel_spec, title, content, conv_id, honcho_session_key, queued_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (channel_spec, title, content, conv_id, honcho_session_key, now)
+            "INSERT INTO pending_notifications (channel_spec, title, content, conv_id, memory_session_title, queued_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (channel_spec, title, content, conv_id, memory_session_title, now)
         )
         self.conn.commit()
 

@@ -22,7 +22,7 @@ A general-purpose agent dispatcher for [Zo Computer](https://zo.computer) — fr
 **Multi-Backend**
 - Dispatch to the Zo API (`backend: zo`) or a local [Hermes Agent](https://github.com/NousResearch/hermes-agent) instance (`backend: hermes`) via [zo-hermes](https://github.com/JackALaing/zo-hermes)
 - Set `default_backend` in `config/config.json` to choose which backend agents use when they omit `backend`
-- Hermes agents support per-agent reasoning effort, iteration limits, memory/context toggles, toolset restrictions, and `honcho_session_scope` for persistent Honcho memory across runs
+- Hermes agents support per-agent reasoning effort, iteration limits, memory/context toggles, toolset restrictions, and `memory_session_scope` for persistent memory session titles across runs
 
 **Reliability & Cost Control**
 - Built-in Zo API resilience: per-agent `timeout` and `retry_delays`, automatic retry on empty/failed responses, session pool recovery
@@ -137,23 +137,23 @@ What that unlocks:
 
 - local Hermes execution for that agent
 - per-agent Hermes controls: `reasoning`, `max_iterations`, `skip_memory`, `skip_context`, `tools`, `tools_deny`
-- persistent Honcho session control with `honcho_session_scope`, so a Hermes-backed agent can either start fresh each run or accumulate memory across runs
+- persistent memory session control with `memory_session_scope`, so a Hermes-backed agent can either start fresh each run or accumulate memory across runs
 - direct pairing with `notify_channel: discord/<channel-name>` when you want Hermes-backed work to land in a `zo-discord` thread
 - reuse of the same agent file format, with the caveat that Zo `persona` frontmatter is currently meaningful only on the Zo backend. Hermes dispatch still accepts the field in the schema, but `zo-hermes` does not map it to a Hermes personality
 
-### Persistent Honcho Memory Across Runs
+### Persistent Memory Session Titles
 
-Hermes-backed agents can opt into dispatcher-managed Honcho session keys with `honcho_session_scope`.
+Hermes-backed agents can opt into dispatcher-managed memory session titles with `memory_session_scope`.
 
 ```yaml
 backend: hermes
-honcho_session_scope: per-agent
+memory_session_scope: per-agent
 ```
 
-This controls whether a Hermes agent keeps the same Honcho session across runs or gets a fresh one each time:
+This controls whether a Hermes agent keeps the same Honcho-backed memory session across runs or gets a fresh one each time:
 
-- `per-dispatch`: default when Honcho is active. Each dispatch gets its own Honcho session key.
-- `per-agent`: reuses the same Honcho session key for that agent on every run.
+- `per-dispatch`: default when Hermes is using the Honcho memory provider. Each dispatch gets its own memory session title.
+- `per-agent`: reuses the same memory session title for that agent on every run.
 
 Why this matters:
 
@@ -163,8 +163,8 @@ Why this matters:
 Scope boundaries:
 
 - This applies only to `zo-dispatcher` agents with `backend: hermes`.
-- `honcho_session_scope` only takes effect when Honcho is configured and active for Hermes.
-- If you omit `honcho_session_scope`, dispatcher defaults to `per-dispatch`.
+- `memory_session_scope` only takes effect when Hermes is configured to use the Honcho memory provider.
+- If you omit `memory_session_scope`, dispatcher defaults to `per-dispatch`.
 - It does not affect native Zo agents.
 - It does not make arbitrary webhook sources talk to Hermes unless they are routed through `zo-dispatcher` or another caller that hits `zo-hermes` directly.
 - If you want Hermes output in Discord, you still need `zo-discord` for the Discord delivery layer.

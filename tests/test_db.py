@@ -204,9 +204,9 @@ class TestNotificationQueue:
         assert len(pending) == 2
         assert pending[0]["channel_spec"] == "discord/general"
         assert pending[0]["title"] == "Title"
-        assert pending[0]["honcho_session_key"] == "dispatcher-test-agent-7"
+        assert pending[0]["memory_session_title"] == "dispatcher-test-agent-7"
         assert pending[1]["channel_spec"] == "sms"
-        assert pending[1]["honcho_session_key"] == ""
+        assert pending[1]["memory_session_title"] == ""
 
         remaining = db.pop_pending_notifications()
         assert len(remaining) == 0

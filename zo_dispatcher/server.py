@@ -22,6 +22,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
 from zoneinfo import ZoneInfo
 
 from zo_dispatcher.db import DispatcherDB
@@ -30,9 +31,7 @@ from zo_dispatcher.webhooks import verify_signature, apply_transform, event_matc
 from zo_dispatcher.channels import BUILTIN_CHANNELS, MCP_URL, CHANNEL_RETRY_DELAYS
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "config.json"
-DEFAULT_HONCHO_SESSION_SCOPE = "per-dispatch"
-HONCHO_HOST = "hermes"
-HONCHO_GLOBAL_CONFIG_PATH = Path.home() / ".honcho" / "config.json"
+DEFAULT_MEMORY_SESSION_SCOPE = "per-dispatch"
 
 # Empirically discovered Zo API error substrings when all compute sessions are occupied.
 # If these change upstream, pool retry will stop triggering (falls through to hard error).
@@ -84,19 +83,19 @@ def compute_jitter(agent_id: str, max_jitter: int) -> float:
     return h % max_jitter
 
 
-def sanitize_honcho_key_component(value: str) -> str:
+def sanitize_memory_session_component(value: str) -> str:
     sanitized = re.sub(r"[^A-Za-z0-9_-]+", "-", value.replace("/", "-"))
     sanitized = re.sub(r"-+", "-", sanitized).strip("-_")
     return sanitized or "agent"
 
 
-def build_dispatcher_honcho_session_key(agent_id: str, scope: str, run_id: int) -> str:
-    sanitized_agent_id = sanitize_honcho_key_component(agent_id)
+def build_dispatcher_memory_session_title(agent_id: str, scope: str, run_id: int) -> str:
+    sanitized_agent_id = sanitize_memory_session_component(agent_id)
     if scope == "per-agent":
         return f"dispatcher-{sanitized_agent_id}"
     if scope == "per-dispatch":
         return f"dispatcher-{sanitized_agent_id}-{run_id}"
-    raise ValueError(f"Unsupported honcho session scope: {scope!r}")
+    raise ValueError(f"Unsupported memory session scope: {scope!r}")
 
 
 class Dispatcher:
@@ -142,8 +141,8 @@ class Dispatcher:
             self._config_mtime: float = CONFIG_PATH.stat().st_mtime
         except OSError:
             self._config_mtime: float = 0
-        self._hermes_config_mtime: float | None = None
-        self._hermes_honcho_active: bool | None = None
+        self._hermes_memory_config_mtime: float | None = None
+        self._hermes_honcho_memory_active: bool | None = None
 
     def _refresh_agents(self):
         self._agents = self.scan_agents()
@@ -160,81 +159,60 @@ class Dispatcher:
         async with self._dispatch_semaphore:
             await self.dispatch_agent(agent, context)
 
-    def _honcho_config_path(self) -> Path:
-        configured_path = self.config.get("honcho_config_path") if hasattr(self, "config") else None
-        if configured_path:
-            return Path(configured_path).expanduser()
-
+    def _hermes_config_path(self) -> Path:
         hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
-        local_path = hermes_home / "honcho.json"
-        if local_path.exists():
-            return local_path
-        return HONCHO_GLOBAL_CONFIG_PATH
+        return hermes_home / "config.yaml"
 
-    def _is_hermes_honcho_active(self) -> bool:
-        config_path = self._honcho_config_path()
-        env_api_key = os.environ.get("HONCHO_API_KEY", "").strip()
-        env_base_url = os.environ.get("HONCHO_BASE_URL", "").strip()
+    def _is_hermes_honcho_memory_active(self) -> bool:
+        config_path = self._hermes_config_path()
 
         try:
             mtime = config_path.stat().st_mtime
         except OSError:
-            self._hermes_config_mtime = None
-            active = bool(env_api_key or env_base_url)
-            self._hermes_honcho_active = active
-            return active
+            self._hermes_memory_config_mtime = None
+            self._hermes_honcho_memory_active = False
+            return False
 
-        cached_active = getattr(self, "_hermes_honcho_active", None)
-        if getattr(self, "_hermes_config_mtime", None) == mtime and cached_active is not None:
+        cached_active = getattr(self, "_hermes_honcho_memory_active", None)
+        if getattr(self, "_hermes_memory_config_mtime", None) == mtime and cached_active is not None:
             return cached_active
 
         try:
-            raw = json.loads(config_path.read_text()) or {}
+            raw = yaml.safe_load(config_path.read_text()) or {}
         except Exception as e:
-            logger.debug(f"Failed to read Honcho config {config_path}: {e}")
-            active = bool(env_api_key or env_base_url)
+            logger.debug("Failed to read Hermes config %s: %s", config_path, e)
+            active = False
         else:
-            host_block = (raw.get("hosts") or {}).get(HONCHO_HOST, {})
-            host_enabled = host_block.get("enabled")
-            root_enabled = raw.get("enabled")
-            api_key = host_block.get("apiKey") or raw.get("apiKey") or env_api_key
-            base_url = (
-                host_block.get("baseUrl")
-                or host_block.get("base_url")
-                or raw.get("baseUrl")
-                or raw.get("base_url")
-                or env_base_url
-            )
-            if host_enabled is not None:
-                active = bool(host_enabled)
-            elif root_enabled is not None:
-                active = bool(root_enabled)
+            memory_cfg = raw.get("memory")
+            if isinstance(memory_cfg, dict):
+                provider = str(memory_cfg.get("provider", "") or "").strip().lower()
+                active = provider == "honcho"
             else:
-                active = bool(api_key or base_url)
+                active = False
 
-        self._hermes_config_mtime = mtime
-        self._hermes_honcho_active = active
+        self._hermes_memory_config_mtime = mtime
+        self._hermes_honcho_memory_active = active
         return active
 
-    def _resolve_honcho_session_scope(self, agent: dict, backend: str) -> str | None:
-        configured_scope = agent.get("honcho_session_scope")
+    def _resolve_memory_session_scope(self, agent: dict, backend: str) -> str | None:
+        configured_scope = agent.get("memory_session_scope")
         if backend != "hermes":
             if configured_scope:
                 logger.debug(
-                    "Ignoring honcho_session_scope=%s for non-Hermes agent '%s'",
+                    "Ignoring memory_session_scope=%s for non-Hermes agent '%s'",
                     configured_scope,
                     agent["id"],
                 )
             return None
-        if not self._is_hermes_honcho_active():
+        if not self._is_hermes_honcho_memory_active():
             return None
-        return configured_scope or DEFAULT_HONCHO_SESSION_SCOPE
+        return configured_scope or DEFAULT_MEMORY_SESSION_SCOPE
 
-    def _resolve_honcho_session_key(self, agent: dict, backend: str, run_id: int) -> str:
-        scope = self._resolve_honcho_session_scope(agent, backend)
+    def _resolve_memory_session_title(self, agent: dict, backend: str, run_id: int) -> str:
+        scope = self._resolve_memory_session_scope(agent, backend)
         if not scope:
             return ""
-        return build_dispatcher_honcho_session_key(agent["id"], scope, run_id)
+        return build_dispatcher_memory_session_title(agent["id"], scope, run_id)
 
     def _maybe_reload_config(self):
         try:
@@ -302,9 +280,9 @@ class Dispatcher:
         title: str,
         content: str,
         conv_id: str = "",
-        honcho_session_key: str = "",
+        memory_session_title: str = "",
     ):
-        self.db.queue_notification(channel_spec, title, content, conv_id, honcho_session_key)
+        self.db.queue_notification(channel_spec, title, content, conv_id, memory_session_title)
         logger.info(f"Queued notification '{title}' for business hours")
 
     async def _drain_notification_queue(self):
@@ -322,7 +300,7 @@ class Dispatcher:
                     title=notif["title"],
                     content=notif["content"],
                     conv_id=notif.get("conv_id", ""),
-                    honcho_session_key=notif.get("honcho_session_key", ""),
+                    memory_session_title=notif.get("memory_session_title", ""),
                 )
             except Exception:
                 failed.append(notif)
@@ -332,7 +310,7 @@ class Dispatcher:
                 notif["title"],
                 notif["content"],
                 notif.get("conv_id", ""),
-                notif.get("honcho_session_key", ""),
+                notif.get("memory_session_title", ""),
             )
 
     def scan_agents(self) -> list[dict]:
@@ -699,7 +677,7 @@ class Dispatcher:
                           skip_context: bool | None = None,
                           enabled_toolsets: list[str] | None = None,
                           disabled_toolsets: list[str] | None = None,
-                          honcho_session_key: str | None = None) -> tuple[str, str]:
+                          memory_session_title: str | None = None) -> tuple[str, str]:
         """Call hermes-api (non-streaming) — same contract as call_zo_ask."""
         payload = {
             "input": prompt,
@@ -719,8 +697,8 @@ class Dispatcher:
             payload["enabled_toolsets"] = enabled_toolsets
         if disabled_toolsets:
             payload["disabled_toolsets"] = disabled_toolsets
-        if honcho_session_key:
-            payload["honcho_session_key"] = honcho_session_key
+        if memory_session_title:
+            payload["memory_session_title"] = memory_session_title
 
         timeout = aiohttp.ClientTimeout(
             total=timeout_seconds or self.config.get("zo_ask_timeout_seconds", 1800)
@@ -746,14 +724,14 @@ class Dispatcher:
 
     async def _post_to_channel(self, channel_config: dict, title: str, content: str,
                                discord_channel: str | None = None, conv_id: str = "",
-                               honcho_session_key: str = ""):
+                               memory_session_title: str = ""):
         payload = {
             "title": title,
             "content": content,
             "conversation_id": conv_id,
         }
-        if honcho_session_key:
-            payload["honcho_session_key"] = honcho_session_key
+        if memory_session_title:
+            payload["memory_session_title"] = memory_session_title
         if discord_channel:
             payload["channel_name"] = discord_channel
 
@@ -769,7 +747,7 @@ class Dispatcher:
                 raise RuntimeError(f"Channel notification failed: {resp.status} {error}")
 
     async def _deliver(self, channel_spec: str, title: str, content: str, conv_id: str = "",
-                       honcho_session_key: str = ""):
+                       memory_session_title: str = ""):
         parts = channel_spec.split("/", 1)
         channel_name = parts[0]
         discord_channel = parts[1] if len(parts) > 1 else None
@@ -792,7 +770,7 @@ class Dispatcher:
                         content,
                         discord_channel,
                         conv_id,
-                        honcho_session_key,
+                        memory_session_title,
                     )
                 else:
                     tool_name, build_payload = BUILTIN_CHANNELS[channel_name]
@@ -827,11 +805,11 @@ class Dispatcher:
         return prompt
 
     async def _notify(self, channel_spec: str, title: str, content: str,
-                       conv_id: str = "", honcho_session_key: str = ""):
+                       conv_id: str = "", memory_session_title: str = ""):
         if not self._is_business_hours():
-            self._queue_notification(channel_spec, title, content, conv_id, honcho_session_key)
+            self._queue_notification(channel_spec, title, content, conv_id, memory_session_title)
             return
-        await self._deliver(channel_spec, title, content, conv_id, honcho_session_key)
+        await self._deliver(channel_spec, title, content, conv_id, memory_session_title)
 
     async def dispatch_agent(self, agent: dict, context: dict | None = None,
                              queue_file: Path | None = None):
@@ -854,7 +832,7 @@ class Dispatcher:
             event_type=event_type,
             source=source,
         )
-        honcho_session_key = self._resolve_honcho_session_key(agent, backend, run_id)
+        memory_session_title = self._resolve_memory_session_title(agent, backend, run_id)
 
         conv_id = ""
         try:
@@ -877,7 +855,7 @@ class Dispatcher:
                     skip_context=agent.get("skip_context"),
                     enabled_toolsets=tools if isinstance(tools, list) else None,
                     disabled_toolsets=tools_deny if isinstance(tools_deny, list) else None,
-                    honcho_session_key=honcho_session_key or None,
+                    memory_session_title=memory_session_title or None,
                 )
             else:
                 output, conv_id = await self.call_zo_ask(
@@ -899,7 +877,7 @@ class Dispatcher:
                     title=f"[FAILED] {title}",
                     content=f"Agent `{agent_id}` failed:\n\n```\n{e}\n```",
                     conv_id=error_conv_id,
-                    honcho_session_key=honcho_session_key,
+                    memory_session_title=memory_session_title,
                 )
             return
 
@@ -917,7 +895,7 @@ class Dispatcher:
                             f"**Conversation**: `{conv_id}`\n\n"
                             f"Open the conversation and send \"Please continue\".",
                     conv_id=conv_id,
-                    honcho_session_key=honcho_session_key,
+                    memory_session_title=memory_session_title,
                 )
             return
 
@@ -931,7 +909,7 @@ class Dispatcher:
                 title,
                 output,
                 conv_id=conv_id,
-                honcho_session_key=honcho_session_key,
+                memory_session_title=memory_session_title,
             )
 
         await self._handle_max_runs(agent)
