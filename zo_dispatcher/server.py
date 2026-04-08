@@ -103,6 +103,7 @@ class Dispatcher:
         self.config = config
         self.agents_dir = Path(config["agents_dir"])
         self.db = DispatcherDB(config["db_path"])
+        self.queue_dir = Path(config.get("queue_dir") or (self.agents_dir / ".queues"))
         self.api_key = os.environ.get("DISPATCHER_ZO_API_KEY")
         if not self.api_key:
             raise ValueError("DISPATCHER_ZO_API_KEY not set")
@@ -405,7 +406,7 @@ class Dispatcher:
         return self._queue_locks[agent_id]
 
     def _queues_dir(self) -> Path:
-        return self.agents_dir / ".queues"
+        return self.queue_dir
 
     def _queue_path(self, agent_id: str) -> Path:
         return self._queues_dir() / f"{agent_id.replace('/', '__')}.jsonl"
